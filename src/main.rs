@@ -8,6 +8,10 @@
 mod index;
 mod model;
 mod parser;
+mod preview;
+mod resume;
+mod search;
+mod tui;
 
 use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -76,13 +80,64 @@ fn main() {
         Some("--index") => cmd_index(),
         Some("--refresh") => cmd_refresh(),
         Some("-h") | Some("--help") => print_help(),
-        _ => {
-            eprintln!(
-                "csess: TUI 는 아직 구현 전입니다 (Phase B step 5).\n\
-                 현재는 `csess --index-file <f>` / `csess --index` 만 지원합니다. `-h` 로 도움말."
-            );
+        None => cmd_tui(),
+        Some(other) => {
+            eprintln!("csess: 알 수 없는 인자 '{other}'. `-h` 로 도움말.");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// 기본 동작: 캐시 갱신 → 로드 → TUI → (복원 후) resume/copy. [step 5/6]
+fn cmd_tui() {
+    use std::io::IsTerminal;
+    if !std::io::stdout().is_terminal() {
+        eprintln!("csess: TUI 는 터미널에서 실행하세요 (비-tty). 데이터 확인은 `csess --index` / `--refresh`.");
+        std::process::exit(1);
+    }
+    let mut store = match index::IndexStore::open(&db_path()) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("csess: 인덱스 DB 열기 실패: {e}");
             std::process::exit(1);
         }
+    };
+    let mut cands = index::enumerate_claude(&claude_root());
+    cands.extend(index::enumerate_codex(&codex_root()));
+    if let Err(e) = store.refresh(&cands) {
+        eprintln!("csess: 인덱스 갱신 실패: {e}");
+        std::process::exit(1);
+    }
+    let rows = match store.load_rows() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("csess: 인덱스 로드 실패: {e}");
+            std::process::exit(1);
+        }
+    };
+    if rows.is_empty() {
+        eprintln!("csess: 세션이 없습니다 (Claude: {} / Codex: {})", claude_root(), codex_root());
+        std::process::exit(1);
+    }
+
+    match tui::run(rows, now_epoch()) {
+        tui::Outcome::Quit => {}
+        tui::Outcome::Resume(row) => report_resume(resume::resume(&row, false)),
+        tui::Outcome::Copy(row) => report_resume(resume::resume(&row, true)),
+    }
+}
+
+/// resume 가드 실패를 사용자에게 알린다. (성공 exec 는 반환하지 않음)
+fn report_resume(res: Result<(), resume::ResumeError>) {
+    if let Err(e) = res {
+        match e {
+            resume::ResumeError::NoId => eprintln!("csess: 세션 id 가 없어 resume 거부"),
+            resume::ResumeError::BadCwd(c) => eprintln!(
+                "csess: cwd 불명/비유효라 resume 거부: {}",
+                if c.is_empty() { "<empty>" } else { &c }
+            ),
+        }
+        std::process::exit(1);
     }
 }
 
@@ -154,10 +209,11 @@ fn cmd_refresh() {
 fn print_help() {
     eprintln!(
         "csess (Phase B) — Claude/Codex 세션 본문 검색 + resume 런처\n\n\
-         현재 구현(데이터 레이어, step 1–3):\n  \
+         csess                  TUI 실행: 본문검색 → enter 로 resume (기본)\n  \
          csess --index-file F   파일 F 의 8필드 TSV 한 줄 (Phase A 파리티 시임)\n  \
          csess --index          Claude depth-2 세션 전체를 mtime 역순 TSV 로 (fresh)\n  \
          csess --refresh        SQLite 캐시 증분 갱신 (Claude+Codex, parsed/cached/deleted)\n\n\
+         TUI 키: 타이핑=검색 · ↑↓/ctrl-p,n=이동 · enter=resume · ctrl-y=복사 · ctrl-d,u=프리뷰 스크롤 · esc=종료\n\n\
          env:\n  \
          CSESS_CLAUDE_ROOT   Claude projects 루트 (기본 ~/.claude/projects)\n  \
          CSESS_CODEX_ROOT    Codex sessions 루트 (기본 ~/.codex/sessions)\n  \

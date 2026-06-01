@@ -27,6 +27,11 @@ fn denylist() -> &'static Regex {
     })
 }
 
+/// 텍스트가 슬래시-커맨드/시스템 래퍼인지(제목·프리뷰에서 스킵용). [D5]
+pub fn is_slash_wrapper(text: &str) -> bool {
+    denylist().is_match(text)
+}
+
 /// jq `-r` 로 본 `.cwd` 값. 거의 항상 문자열, 비문자는 compact JSON 텍스트.
 fn render_raw(v: &Value) -> String {
     match v {
