@@ -1,0 +1,4 @@
+{"type":"session_meta","payload":{"id":"019c0000-0000-7000-8000-000000000002","cwd":"/Users/me/work/fb"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /Users/me/work/fb"}]}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context> cwd </environment_context>"}]}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"폴백 경로 실제 질문"}]}}

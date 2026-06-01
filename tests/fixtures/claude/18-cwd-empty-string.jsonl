@@ -1,0 +1,3 @@
+{"type":"attachment","cwd":""}
+{"type":"attachment","cwd":"/should/not/win"}
+{"type":"user","message":{"content":"빈 cwd 먼저"}}

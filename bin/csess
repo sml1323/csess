@@ -48,7 +48,7 @@ CSESS_HDR_ASST=$'\033[1;38;2;78;201;176m▌ Claude\033[0m'
 # ----------------------------------------------------------------------------
 csess_reltime() {
   local then="$1" now diff s
-  now=$(date +%s); diff=$(( now - then )); [ "$diff" -lt 0 ] && diff=0
+  now=${CSESS_NOW:-$(date +%s)}; diff=$(( now - then )); [ "$diff" -lt 0 ] && diff=0   # CSESS_NOW: Phase B 골든 패리티 결정성 시임
   if   [ "$diff" -lt 60 ];      then s='now'
   elif [ "$diff" -lt 3600 ];    then s="$(( diff / 60 ))m"
   elif [ "$diff" -lt 86400 ];   then s="$(( diff / 3600 ))h"

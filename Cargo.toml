@@ -1,0 +1,24 @@
+[package]
+name = "csess"
+version = "0.2.0"
+edition = "2021"
+description = "Claude/Codex 세션 본문 검색 + resume 런처 (Phase B — Rust TUI)"
+license = "MIT"
+default-run = "csess"
+
+[[bin]]
+name = "csess"
+path = "src/main.rs"
+
+# Phase B 데이터 레이어(step 1–2). index/search/tui/codex 의존성은 해당 단계에서 추가.
+[dependencies]
+serde_json = "1"
+regex = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[profile.release]
+lto = true
+strip = true
+
+[dev-dependencies]
+tempfile = "3.27.0"

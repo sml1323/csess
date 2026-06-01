@@ -1,0 +1,7 @@
+{"type":"session_meta","payload":{"id":"019c0000-0000-7000-8000-000000000001","cwd":"/Users/me/work/codeproj"}}
+{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions instructions>Filesystem sandboxing..."}]}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /Users/me/work/codeproj"}]}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context> <cwd>/Users/me/work/codeproj</cwd> </environment_context>"}]}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"실제 코덱스 질문입니다"}]}}
+{"type":"event_msg","payload":{"type":"user_message","message":"실제 코덱스 질문입니다"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"네 도와드릴게요"}}

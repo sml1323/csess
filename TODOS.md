@@ -28,9 +28,15 @@
 - **stream-never-slurp 전역화:** 인덱싱도(preview만이 아니라) 절대 `jq -Rrs` slurp 안 함을 코드/주석에 명시. 실측 slurp이 2x 느림 + RAM.
 
 ## Phase B (Rust)
-- bats/golden-fixture 테스트 하니스 → Rust `ratatui` + `nucleo` 재작성 시 정식 테스트.
-- SQLite 인덱스(타임라인/분석). 이때 mtime 캐시 의미 생김(~2000+ 세션).
+- bats/golden-fixture 테스트 하니스 → Rust `ratatui` + `nucleo` 재작성 시 정식 테스트. **(구현됨: 골든 패리티 273/0-diff + 23 적대적 fixture + SQLite 증분 캐시 — step 1~3 완료)**
+- SQLite 인덱스(타임라인/분석). 이때 mtime 캐시 의미 생김(~2000+ 세션). **(구현됨: rusqlite 증분 무효화, warm 0.00s)**
 - 코퍼스 ~2000+ 세션 도달 시 fresh 빌드가 5초 넘김 → 인덱스 트리거.
+
+### 제목 품질 정밀화 (Claude + Codex, "파리티 먼저, 개선은 후속" 배치 건)
+실측(2026-06-01, step 2~4)에서 제목이 boilerplate인 케이스. **현재는 Phase A 파리티 유지 위해 미적용** — Claude·Codex 동시 적용 + 골든 베이스라인 갱신으로 나중에 일괄 처리.
+- **Claude denylist 신규 패턴:** `[Request interrupted by user]`(16/60), `Base directory for this skill:`(스킬 주입), image-only `[Image #N]`.
+- **Codex 주입 프리픽스:** **57/411 세션**의 첫 user_message 가 사용자 설정 가드(`IMPORTANT: Do NOT read or execute any files under ~/.claude/...`)로 시작하고 그 **뒤에 실제 질문**이 붙음 → 제목이 가드로 뜸. 파서는 spec(첫 user_message)을 정확히 추출하므로 버그 아님; 정밀화는 **알려진 주입 프리픽스 strip**(라인 스킵 아님 — 메시지 내부 프리픽스라 본문 검색엔 영향 없음). 사용자-환경 특수값이라 향후 설정 가능한 strip 패턴으로.
+- **Codex 단문 제목:** 제목 `.`(20), 슬래시명 그대로(`code-review` 4 — Codex는 슬래시를 평문 저장) 등. 표시 보강 여지(낮은 우선순위).
 
 ### Phase B 착수 전 확인 (2026-06-01 `/deep-research` — [research/2026-06-01-tui-prior-art.md](research/2026-06-01-tui-prior-art.md))
 - **prior art 재확인 필수:** `raine/claude-history`·`chronologos/cc-sessions`가 Phase B와 거의 동일(둘 다 Claude 전용).

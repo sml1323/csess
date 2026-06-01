@@ -1,0 +1,3 @@
+{"type":"attachment","cwd":"/sg/dir"}
+{"type":"user","message":{"content":"\ud800 broken surrogate"}}
+{"type":"user","message":{"content":"surrogate 뒤 정상 질문"}}

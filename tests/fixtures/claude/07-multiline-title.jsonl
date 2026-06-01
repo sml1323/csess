@@ -1,0 +1,2 @@
+{"type":"attachment","cwd":"/m/n"}
+{"type":"user","message":{"content":"first line\n\n\nsecond\tpart\rthird"}}

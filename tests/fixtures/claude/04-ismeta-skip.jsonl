@@ -1,0 +1,3 @@
+{"type":"attachment","cwd":"/x/y"}
+{"type":"user","isMeta":true,"message":{"content":"메타 제목 무시"}}
+{"type":"user","message":{"content":"실제 제목"}}

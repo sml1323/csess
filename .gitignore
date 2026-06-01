@@ -9,4 +9,4 @@
 .DS_Store
 
 # rust
-Cargo.lock
+# (Cargo.lock 은 바이너리 크레이트라 재현 빌드 위해 커밋 — 의도적으로 무시 안 함)
