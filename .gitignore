@@ -1,0 +1,12 @@
+# build
+/target/
+*.o
+
+# cache (런타임 인덱스)
+.cache/
+
+# os
+.DS_Store
+
+# rust
+Cargo.lock
