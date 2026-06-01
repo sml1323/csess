@@ -36,9 +36,10 @@ fn user_hdr_style() -> Style {
         .fg(Color::Rgb(235, 235, 235))
         .add_modifier(Modifier::BOLD)
 }
-fn asst_hdr_style() -> Style {
+/// assistant 헤더 색 = 소스별(Claude 주황 / Codex 그린). [theme]
+fn asst_hdr_style(source: Source) -> Style {
     Style::default()
-        .fg(Color::Rgb(78, 201, 176))
+        .fg(crate::theme::source_color_e(source))
         .add_modifier(Modifier::BOLD)
 }
 fn dim() -> Style {
@@ -233,7 +234,7 @@ fn render_turns(turns: &[(Role, Vec<Block>)], source: Source) -> Vec<Line<'stati
         }
         match role {
             Role::User => out.push(Line::styled("▌ 나".to_string(), user_hdr_style())),
-            Role::Assistant => out.push(Line::styled(asst_label.to_string(), asst_hdr_style())),
+            Role::Assistant => out.push(Line::styled(asst_label.to_string(), asst_hdr_style(source))),
         }
         out.push(Line::from(""));
         for b in blocks {

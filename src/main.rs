@@ -11,6 +11,8 @@ mod parser;
 mod preview;
 mod resume;
 mod search;
+mod theme;
+mod tree;
 mod tui;
 
 use std::io::Write;
@@ -120,7 +122,8 @@ fn cmd_tui() {
         std::process::exit(1);
     }
 
-    match tui::run(rows, now_epoch()) {
+    let home = std::env::var("HOME").unwrap_or_default();
+    match tui::run(rows, now_epoch(), home) {
         tui::Outcome::Quit => {}
         tui::Outcome::Resume(row) => report_resume(resume::resume(&row, false)),
         tui::Outcome::Copy(row) => report_resume(resume::resume(&row, true)),
