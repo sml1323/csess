@@ -9,18 +9,20 @@
 #   2) 파일당 병렬로 한 줄 8필드 TSV 추출 → mtime 역순 정렬, temp 파일(idx)로        [D3/D10/D12]
 #   3) fzf(--disabled) + change:reload(--browse): 타이핑마다 **전체 대화 본문**을
 #      rg/grep 으로 검색(공백=AND). --preview 로 전체 대화 렌더(ctrl-d/u 스크롤)     [D8/D12/D13]
-#   4) ctrl-g 프로젝트 스코프 토글 · ctrl-o 디렉토리 뷰(enter 로 드릴다운) · ctrl-a 전체  [D13]
-#   5) 고른 세션의 cwd 로 cd 한 뒤 `claude --resume <id>` 로 exec (tab=명령 복사)    [D7]
+#   4) tab=계층 디렉토리 트리(yazi식, enter 로 드릴/resume) · ctrl-g 프로젝트 토글 ·
+#      ctrl-h/.. 상위 · ctrl-a 전체                                            [D14]
+#   5) 고른 세션의 cwd 로 cd 한 뒤 `claude --resume <id>` 로 exec (ctrl-y=명령 복사)  [D7]
 #
 # 셸 핀: macOS 시스템 bash 3.2.57 에는 `declare -A`(연관배열)이 없고 Homebrew
-# bash 도 PATH 에 없다. 상태(scope/mode)는 연관배열 대신 temp 파일로 둬 3.2-safe 한
-# /usr/bin/env bash 로 핀한다. [D9/D13]
+# bash 도 PATH 에 없다. 상태(scope/mode/dirpath)는 연관배열 대신 temp 파일로 둬 3.2-safe 한
+# /usr/bin/env bash 로 핀한다. 트리/요약 로직은 awk 로 빼서 awk 자체 배열을 쓴다. [D9/D13/D14]
 #
 # 환경변수 (테스트 시임 / 내부):
 #   CSESS_CLAUDE_ROOT  projects 루트 오버라이드 (기본 ~/.claude/projects)   [D10]
 #   CSESS_DRY_RUN      세팅되면 resume 을 exec 하지 않고 명령만 출력         [D10]
-#   CSESS_DIR          매-실행 temp dir (idx/scope/mode) — main 이 export, 서브커맨드가 읽음  [D13]
+#   CSESS_DIR          매-실행 temp dir (idx/scope/mode/dirpath) — main 이 export, 서브커맨드가 읽음 [D13/D14]
 #   CSESS_GREP         content 검색 백엔드 (rg 우선, grep 폴백)             [D13]
+#   CSESS_NO_BAT       세팅되면 프리뷰 마크다운 색칠에 bat 을 쓰지 않음(plain)  [D14]
 
 set -u
 
@@ -30,9 +32,14 @@ set -u
 CLAUDE_ROOT="${CSESS_CLAUDE_ROOT:-$HOME/.claude/projects}"
 TITLE_MAX=80              # 제목 자르는 길이 (코드포인트)                    [D6]
 PARALLEL=8               # 파일당 파서 병렬도 (xargs -P)                    [D3]
-PREVIEW_MAX_LINES=4000    # 프리뷰 전체 대화 렌더 출력 줄 상한 (거대 세션 보호) [D13]
+PREVIEW_MAX_LINES=4000    # 프리뷰 렌더 출력 줄 상한 (거대 세션 보호)              [D13]
+PREVIEW_INPUT_BYTES="${CSESS_PREVIEW_BYTES:-500000}"  # 프리뷰가 jq 로 파싱할 입력 바이트 상한 — 스크롤 CPU 완화 (거대 세션은 앞부분만 글랜스). 500KB면 첫 질문+초반 대화는 충분. 낮추면 더 가벼움/올리면 더 많은 본문. [D14]
 TAB=$(printf '\t')
 DIM=$'\033[2m'; RESET=$'\033[0m'   # 리스트의 시각/프로젝트 컬럼 de-emphasis (fzf --ansi) [D12]
+
+# [D14] 프리뷰 역할 헤더 (truecolor). claude-history 팔레트: 나=밝은 흰 굵게, Claude=teal 굵게.
+CSESS_HDR_USER=$'\033[1;38;2;235;235;235m▌ \353\202\230\033[0m'
+CSESS_HDR_ASST=$'\033[1;38;2;78;201;176m▌ Claude\033[0m'
 
 # ----------------------------------------------------------------------------
 # [D12] 상대시각: epoch -> "  2h" 류 4칸 우정렬 plain 문자열. 리스트에서 "언제"를
@@ -53,7 +60,7 @@ csess_reltime() {
 
 # ----------------------------------------------------------------------------
 # [D12] 프로젝트 라벨: cwd 의 마지막 2 path 컴포넌트 ("work/csess"). 긴 full cwd
-#   대신 짧고 충분히 고유한 표시 — 리스트는 컬럼으로, ctrl-g/ctrl-o 는 이 라벨로.
+#   대신 짧고 충분히 고유한 표시 — 리스트는 컬럼으로, ctrl-g 는 이 라벨로.
 # ----------------------------------------------------------------------------
 csess_proj() {
   local cwd="$1" base parent
@@ -65,6 +72,14 @@ csess_proj() {
   else
     printf '%s' "$base"
   fi
+}
+
+# [D14] 절대경로를 $HOME 기준 ~ 표기로. 트리 프롬프트/요약에서 사용.
+csess_homerel() {
+  local p="$1"
+  if [ "$p" = "$HOME" ]; then printf '~'
+  elif [ "${p#$HOME/}" != "$p" ]; then printf '~/%s' "${p#$HOME/}"
+  else printf '%s' "$p"; fi
 }
 
 # ----------------------------------------------------------------------------
@@ -136,20 +151,36 @@ csess_index_file() {
 }
 
 # ----------------------------------------------------------------------------
-# [D13] 미리보기: **전체 대화** 스트리밍 렌더. (이전엔 첫질문+마지막출력만 — 그래서
-#   ctrl-d/u 로 스크롤할 게 없었다.) slurp 금지 — `jq -R 'fromjson?'` 라인-tolerant 로
-#   corrupt surrogate / 멀티-MB 파일도 생존. head -n 로 출력 줄을 상한(거대 세션에서
-#   프리뷰 지연 방지; jq 는 SIGPIPE 로 조기 종료). user/assistant 텍스트를 역할 헤더와
-#   함께 순서대로. 슬래시/시스템 래퍼 user 라인은 제목 규칙과 동일하게 스킵.
-#   인자가 "DIR:<cwd>" 면 디렉토리 요약(그 프로젝트의 최근 세션들)을 대신 렌더. [D13]
+# [D14] 미리보기 (예쁘게): user/assistant **텍스트 턴만** 렌더한다. 툴 호출(tool_use)·
+#   tool_result·thinking 블록은 의도적으로 생략(사용자 결정 — "다 없어도 됌"). 실측상
+#   assistant 턴의 75%가 텍스트가 없어(51% 순수 tool_use, 24% 순수 thinking) 자연히
+#   빠지고, 남는 건 실제 사람/모델의 글뿐이다.
+#
+#   본문은 마크다운으로 모아 **bat 한 패스**로 색칠(있으면 ~0.1s)하고, 역할 헤더는 bat
+#   *밖*에서 truecolor 로 다시 칠한다(마커 라인 → ANSI). bat 가 마커에 색을 덧칠해도
+#   strip 후 매칭하므로 견고. bat 없으면 plain 폴백.
+#
+#   인자가 TREE:/UP:/DIR: 면 세션이 아니라 디렉토리 트리 노드 요약을 렌더. [D14]
+#
+#   slurp 금지 — `jq -R 'fromjson?'` 라인-tolerant 라 corrupt surrogate/멀티-MB 파일도
+#   생존. head -n 로 출력 상한(거대 세션 프리뷰 지연 방지; jq 는 SIGPIPE 로 조기 종료).
 # ----------------------------------------------------------------------------
 csess_preview() {
   local arg="$1"
   case "$arg" in
-    DIR:*) csess_preview_dir "${arg#DIR:}"; return 0 ;;
+    TREE:*) csess_preview_tree "${arg#TREE:}"; return 0 ;;
+    UP:*)   csess_preview_tree "${arg#UP:}";   return 0 ;;
+    DIR:*)  csess_preview_tree "${arg#DIR:}";  return 0 ;;
   esac
+  csess_render_session "$arg"
+}
 
-  jq -Rr '
+# JSONL -> 마크다운(텍스트 턴만, 역할 마커 포함) -> bat 색칠 -> 역할 헤더 치환.
+csess_render_session() {
+  local file="$1"
+  # [D14] 입력 바이트 상한으로 거대 세션 프리뷰의 jq 파싱 비용을 묶는다(스크롤 CPU 완화).
+  #   프리뷰는 글랜스라 앞부분이면 충분. head -c 가 마지막 라인을 잘라도 fromjson? 가 스킵.
+  head -c "$PREVIEW_INPUT_BYTES" "$file" 2>/dev/null | jq -Rr '
     fromjson? // empty
     | select(.type == "user" or .type == "assistant")
     | .type as $role
@@ -157,41 +188,99 @@ csess_preview() {
        elif (.message.content | type) == "array"
             then ([.message.content[] | select(.type == "text") | .text] | join("\n"))
        else "" end) as $t
-    | select(($t | type) == "string" and $t != "")
+    | select(($t | type) == "string" and ($t | gsub("\\s"; "")) != "")
     | select( $role == "assistant"
               or ($t | test("^\\s*<(command-name|command-message|command-args|local-command-stdout|local-command-stderr|local-command-caveat|task-notification|bash-input|bash-stdout|bash-stderr|system-reminder)\\b") | not) )
-    | (if $role == "user" then "[1;36m▌ 나[0m"
-       else "[1;35m▌ Claude[0m" end) + "\n" + $t + "\n"
-  ' "$arg" 2>/dev/null | head -n "$PREVIEW_MAX_LINES"
+    | (if $role == "user" then "@@CSESS-ROLE:user@@" else "@@CSESS-ROLE:asst@@" end)
+      + "\n\n" + $t + "\n"
+  ' 2>/dev/null \
+    | head -n "$PREVIEW_MAX_LINES" \
+    | csess_md_color \
+    | csess_role_headers
 }
 
-# 디렉토리 뷰 프리뷰: 그 프로젝트(cwd)의 최근 세션 목록 (idx 에서).
-csess_preview_dir() {
-  local cwd="$1"
-  printf '\033[1m📁 %s\033[0m\n%s\n\n최근 세션 (enter 로 진입):\n' "$(csess_proj "$cwd")" "$cwd"
-  awk -F"$TAB" -v c="$cwd" '$3==c{
-    r=$6; gsub(/\033\[[0-9;]*m/,"",r);
-    printf "  %-5s  %s\n", r, $5
-  }' "$CSESS_DIR/idx" 2>/dev/null | head -50
+# 마크다운 색칠: bat 있으면(그리고 CSESS_NO_BAT 미설정) bat, 아니면 그대로 통과.
+#   --wrap=never: 줄바꿈은 fzf --preview-window 'wrap'(CJK 정확) 에 맡김.
+#   --paging=never: 프리뷰 안에서 less 호출 금지(멈춤 방지). --style=plain: gutter 없음.
+csess_md_color() {
+  if [ -z "${CSESS_NO_BAT:-}" ] && command -v bat >/dev/null 2>&1; then
+    bat --language md --color=always --style=plain --paging=never --wrap=never 2>/dev/null
+  else
+    cat
+  fi
+}
+
+# 역할 마커 라인 -> truecolor 역할 헤더로 치환 + 빈 줄 dedup.
+csess_role_headers() {
+  awk -v UH="$CSESS_HDR_USER" -v AH="$CSESS_HDR_ASST" '
+    # CSI 전반을 제거(SGR m 뿐 아니라 bat 가 붙일 수 있는 ESC[K 등도). strip 결과는
+    # 마커 판별용일 뿐, 출력은 원본 $0 라 과제거 위험 없음.
+    function strip(s){ gsub(/\033\[[0-9;?]*[A-Za-z]/, "", s); return s }
+    {
+      s = strip($0)
+      if (s == "@@CSESS-ROLE:user@@") { if (seen) print ""; print UH; seen=1; pb=0; next }
+      if (s == "@@CSESS-ROLE:asst@@") { if (seen) print ""; print AH; seen=1; pb=0; next }
+      if (s == "") { if (pb) next; pb=1 } else pb=0
+      print
+    }'
+}
+
+# [D14] 트리 노드(절대경로) 요약 미리보기: ~상대경로 + 세션수 + 하위 디렉토리 + 최근 세션.
+csess_preview_tree() {
+  local node="$1" rel
+  rel=$(csess_homerel "$node")
+  awk -F"$TAB" -v base="$node" -v rel="$rel" -v DIM="$DIM" -v RESET="$RESET" '
+    function under(c){ return (c==base || substr(c,1,length(base)+1)==base"/") }
+    { if (under($3)) { tot++
+        if ($3!=base){ r=substr($3,length(base)+2); p=index(r,"/"); seg=(p?substr(r,1,p-1):r)
+          if(!(seg in cs)){cs[seg]=1; csord[++nc]=seg} csc[seg]++ }
+        if (ns<60){ rt=$6; gsub(/\033\[[0-9;]*m/,"",rt); ns++; srt[ns]=rt; sti[ns]=$5 }
+      } }
+    END{
+      printf "\033[1m📂 %s\033[0m   %s%d 세션%s\n\n", rel, DIM, tot, RESET
+      if (nc>0){ printf "%s하위 디렉토리:%s\n", DIM, RESET
+        for(i=1;i<=nc;i++) printf "  \033[1m📁 %s/\033[0m %s(%d)%s\n", csord[i], DIM, csc[csord[i]], RESET
+        printf "\n" }
+      printf "%s최근 세션 (enter 로 진입/resume):%s\n", DIM, RESET
+      for(i=1;i<=ns;i++) printf "  %s%5s%s  %s\n", DIM, srt[i], RESET, sti[i]
+    }' "$CSESS_DIR/idx" 2>/dev/null
+}
+
+# [D14] ? 키 도움말: 전체 키 레퍼런스를 프리뷰 패인에 띄운다(아무 키로 이동하면 닫힘).
+#   헤더는 좁은 터미널에서 잘리므로 핵심만 두고 전체는 여기로 뺀다.
+csess_help_keys() {
+  local C=$'\033[1;38;2;78;201;176m' B=$'\033[1m' R=$'\033[0m' D="$DIM"
+  printf '%s csess 키%s\n\n' "$B" "$R"
+  printf '  %s타이핑%s       전체 대화 본문 검색 %s(공백 = AND)%s\n' "$C" "$R" "$D" "$R"
+  printf '  %senter%s        세션 resume %s·%s 트리에선 디렉토리 드릴/세션 resume\n' "$C" "$R" "$D" "$R"
+  printf '  %stab%s          계층 디렉토리 트리 %s(yazi식)%s\n' "$C" "$R" "$D" "$R"
+  printf '  %sctrl-h%s       트리에서 상위로 %s(목록의 ⬅ .. 행과 동일)%s\n' "$C" "$R" "$D" "$R"
+  printf '  %sctrl-a%s       전체 세션으로\n' "$C" "$R"
+  printf '  %sctrl-g%s       호버 세션의 프로젝트로 스코프 토글\n' "$C" "$R"
+  printf '  %sctrl-y%s       resume 대신 %scd && claude --resume%s 복사\n' "$C" "$R" "$D" "$R"
+  printf '  %sctrl-d / u%s   미리보기 반페이지 ↓/↑\n' "$C" "$R"
+  printf '  %sctrl-f / b%s   미리보기 한페이지 ↓/↑\n' "$C" "$R"
+  printf '  %s?%s            이 도움말 %s(아무 키나 이동하면 닫힘)%s\n' "$C" "$R" "$D" "$R"
+  printf '  %sesc / ctrl-c%s 종료\n' "$C" "$R"
 }
 
 # ----------------------------------------------------------------------------
-# [D13] 본문 전체 검색 + 디렉토리 드릴다운: fzf --disabled + change:reload(--browse).
-#   상태는 매-실행 temp dir($CSESS_DIR)의 두 파일로:
-#     scope : 현재 프로젝트 스코프 cwd (빈 파일 = 전체)
-#     mode  : "dirs" 면 디렉토리 목록 뷰, 빈 파일 = 세션 뷰
-#   fzf 가 자체 매칭을 안 하므로(--disabled) 모든 필터링은 --browse 가 한다.
-#   {q}(쿼리)·{3}(호버 cwd)를 placeholder 로 받아 env 의존 없이 동작.
+# [D13] 본문 전체 검색 + [D14] 계층 트리 드릴다운: fzf --disabled + change:reload(--browse).
+#   상태는 매-실행 temp dir($CSESS_DIR)의 세 파일로:
+#     scope   : 현재 프로젝트 스코프 cwd (빈 파일 = 전체)            [D13]
+#     mode    : "tree" 면 계층 트리 뷰, 빈 파일 = 세션 뷰            [D14]
+#     dirpath : 트리에서 현재 드릴된 prefix (빈 파일 = ROOT=$HOME)    [D14]
+#   fzf 가 자체 매칭을 안 하므로(--disabled) 세션 뷰 필터링은 --browse 가 한다.
 # ----------------------------------------------------------------------------
 
-# 세션/디렉토리 리스트를 쿼리/스코프/모드에 맞춰 방출 (fzf reload 소스).
+# 세션/트리 리스트를 쿼리/스코프/모드에 맞춰 방출 (fzf reload 소스).
 csess_browse() {
   local q="${1:-}" mode scope idx="$CSESS_DIR/idx"
   mode=$(cat "$CSESS_DIR/mode" 2>/dev/null)
   scope=$(cat "$CSESS_DIR/scope" 2>/dev/null)
 
-  if [ "$mode" = "dirs" ]; then
-    csess_list_dirs "$q"
+  if [ "$mode" = "tree" ]; then
+    csess_list_tree "$q"
     return 0
   fi
 
@@ -220,69 +309,127 @@ csess_browse() {
   printf '%s\n' "$cur" | awk -F"$TAB" 'NR==FNR{m[$0]=1; next} (m[$4])' - "$idx"
 }
 
-# 인덱스를 cwd 별로 묶어 디렉토리 뷰 라인 방출. 세션 라인과 같은 8필드 구조라
-# 같은 --with-nth 로 표시되고 {3}(cwd)/{4}(DIR:cwd) 가 동작한다.
-#   mtime '' cwd DIR:cwd projlabel reltime(dim) count(dim) projplain
-csess_list_dirs() {
-  local q="$1"
-  awk -F"$TAB" -v q="$q" '
-    { c=$3
-      if (!(c in seen)) { seen[c]=1; ord[++n]=c; mt[c]=$1; rl[c]=$6; pp[c]=$8 }
-      cnt[c]++ }
+# ----------------------------------------------------------------------------
+# [D14] 계층 트리 한 레벨 방출 (yazi식). 세션 cwd 로만 트리를 친다(디스크 스캔 X — 모든
+#   노드가 정의상 resume 가능한 cwd). PFX(현재 prefix, 빈=ROOT=$HOME) 아래:
+#     - UP 행      : 상위로 ({4}=UP:parent)
+#     - DIR 행     : 직속 하위 디렉토리. **경로압축**(own-session 없는 단일 체인은 한
+#                    노드로: dsaf/my_background/upbit_websocket) + **rollup 카운트**.
+#                    ({3}=node, {4}=TREE:node → enter 로 드릴)
+#     - 세션 행    : 이 prefix 자리에 직속으로 있는 세션(원본 idx 라인 그대로 → resume)
+#   세션 행과 DIR/UP 행 모두 **8필드 동일 구조**라 같은 --with-nth '6,5,7' 로 표시되고
+#   {3}/{4} placeholder 가 동작한다. id 없는 행은 resume 가드가 자연히 거부.
+# ----------------------------------------------------------------------------
+csess_list_tree() {
+  local q="$1" pfx
+  pfx=$(cat "$CSESS_DIR/dirpath" 2>/dev/null)
+  awk -F"$TAB" -v PFX="$pfx" -v HOMEDIR="$HOME" -v q="$q" -v DIM="$DIM" -v RESET="$RESET" '
+    function under(c, base){ return (c==base || substr(c,1,length(base)+1)==base"/") }
+    function relseg(c, base,   rest,p){ rest=substr(c,length(base)+2); p=index(rest,"/"); return (p?substr(rest,1,p-1):rest) }
+    function compress(node,   own,i,c,nsc,single,s,seen){
+      while(1){ own=(node in cset); nsc=0; single=""; split("",seen)   # split("",a): 전체배열 클리어 이식성 idiom (구형 nawk 의 delete-whole 미지원 회피)
+        for(i=1;i<=ncw;i++){ c=cwlist[i]; if(c!=node && under(c,node)){ s=relseg(c,node); if(!(s in seen)){seen[s]=1; nsc++; single=s} } }
+        if(!own && nsc==1){ node=node"/"single; continue }
+        break }
+      return node }
+    function homerel(p){ if(p==HOMEDIR) return "~"; if(substr(p,1,length(HOMEDIR)+1)==HOMEDIR"/") return "~/" substr(p,length(HOMEDIR)+2); return p }
+    {
+      cwd=$3
+      if(!(cwd in cset)){ cset[cwd]=1; cwlist[++ncw]=cwd }
+      sline[NR]=$0; scwd[NR]=cwd; smt[NR]=($1+0); s6[NR]=$6; s5[NR]=$5; nr=NR
+    }
     END{
-      ql=tolower(q)
-      for(i=1;i<=n;i++){ c=ord[i]
-        if (q!="" && index(tolower(pp[c]), ql)==0) continue
-        printf "%s\t\t%s\tDIR:%s\t%s\t%s\t\033[2m%d개\033[0m\t%s\n", mt[c], c, c, pp[c], rl[c], cnt[c], pp[c]
-      }
+      P=(PFX==""?HOMEDIR:PFX); ql=tolower(q)
+      # 직속 세션 + 자식 디렉토리 누적
+      for(r=1;r<=nr;r++){ c=scwd[r]; if(!under(c,P)) continue
+        if(c==P){ own[++no]=r; continue }
+        seg=relseg(c,P); if(!(seg in cseen)){cseen[seg]=1; keys[++nk]=seg}
+        cc[seg]++; if(smt[r]>cmt[seg]){cmt[seg]=smt[r]; crt[seg]=s6[r]} }
+      # UP 행 (현재 위치는 프롬프트가 보여주므로 라벨은 yazi 처럼 단순 ..). cwd($3)는
+      # **비움** — ctrl-g 가 트리 prefix(세션 cwd 아님)를 스코프로 잡는 막다른 길 방지.
+      if(P!=HOMEDIR){ par=P; sub(/\/[^\/]*$/,"",par); if(length(par)<length(HOMEDIR)) par=HOMEDIR
+        printf "%s\t\t\tUP:%s\t\033[2m⬅  ..\033[0m\t\t\t\n", 0, par }
+      # 자식 정렬: count desc, mtime desc (insertion sort — n 작음)
+      for(i=2;i<=nk;i++){ kk=keys[i]; j=i-1
+        while(j>=1 && (cc[keys[j]]<cc[kk] || (cc[keys[j]]==cc[kk] && cmt[keys[j]]<cmt[kk]))){ keys[j+1]=keys[j]; j-- }
+        keys[j+1]=kk }
+      for(i=1;i<=nk;i++){ seg=keys[i]; node=compress(P"/"seg); lab=substr(node,length(P)+2)
+        if(q!="" && index(tolower(lab),ql)==0) continue
+        printf "%s\t\t%s\tTREE:%s\t\033[1m📁 %s/\033[0m\t%s\t%s%d개%s\t%s\n", \
+          cmt[seg], node, node, lab, crt[seg], DIM, cc[seg], RESET, lab }
+      # 직속 세션(원본 라인 그대로 — id/cwd/path 정상 → resume)
+      for(i=1;i<=no;i++){ r=own[i]
+        if(q!="" && index(tolower(s5[r]),ql)==0) continue
+        print sline[r] }
     }' "$CSESS_DIR/idx" 2>/dev/null
 }
 
 # 현재 모드/스코프에 맞는 fzf 프롬프트 (괄호 제거 — change-prompt 안전).
 csess_prompt() {
-  local mode scope
+  local mode scope pfx
   mode=$(cat "$CSESS_DIR/mode" 2>/dev/null)
   scope=$(cat "$CSESS_DIR/scope" 2>/dev/null)
-  if   [ "$mode" = "dirs" ]; then printf 'dir> '
-  elif [ -n "$scope" ];      then printf '%s> ' "$(csess_proj "$scope" | tr -d '()')"
-  else                            printf 'search> '
+  if [ "$mode" = "tree" ]; then
+    pfx=$(cat "$CSESS_DIR/dirpath" 2>/dev/null); [ -z "$pfx" ] && pfx="$HOME"
+    printf '%s> ' "$(csess_homerel "$pfx" | tr -d '()')"
+  elif [ -n "$scope" ]; then printf '%s> ' "$(csess_proj "$scope" | tr -d '()')"
+  else                       printf 'search> '
   fi
 }
 
-# enter: 디렉토리 뷰면 그 프로젝트로 드릴(스코프 설정 후 세션 뷰), 세션 뷰면 accept.
+# enter: 트리 뷰면 UP/드릴(디렉토리), 세션이면 accept. {4}(path)로 행 종류를 판별.
 csess_on_enter() {
-  local cwd="$1" mode
-  mode=$(cat "$CSESS_DIR/mode" 2>/dev/null)
-  if [ "$mode" = "dirs" ]; then
-    printf '%s' "$cwd" > "$CSESS_DIR/scope"
-    : > "$CSESS_DIR/mode"
-    printf 'clear-query+change-prompt(%s)+reload(%s --browse)' \
-      "$(csess_prompt)" "$(csess_shquote "$CSESS_SELF")"
-  else
-    printf 'accept'
-  fi
+  local arg="$1"
+  case "$arg" in
+    UP:*)
+      printf '%s' "${arg#UP:}" > "$CSESS_DIR/dirpath"; printf 'tree' > "$CSESS_DIR/mode"
+      printf 'clear-query+change-prompt(%s)+reload(%s --browse)' \
+        "$(csess_prompt)" "$(csess_shquote "$CSESS_SELF")" ;;
+    TREE:*)
+      printf '%s' "${arg#TREE:}" > "$CSESS_DIR/dirpath"; printf 'tree' > "$CSESS_DIR/mode"
+      printf 'clear-query+change-prompt(%s)+reload(%s --browse)' \
+        "$(csess_prompt)" "$(csess_shquote "$CSESS_SELF")" ;;
+    *)
+      printf 'accept' ;;
+  esac
 }
 
-# ctrl-g: 호버 세션의 프로젝트 스코프를 토글 (같으면 해제, 아니면 설정).
+# ctrl-g: 호버 세션의 프로젝트 스코프를 토글 (같으면 해제, 아니면 설정). 세션 뷰로 복귀.
 csess_toggle_scope() {
   local cwd="$1" cur
   cur=$(cat "$CSESS_DIR/scope" 2>/dev/null)
-  : > "$CSESS_DIR/mode"
+  : > "$CSESS_DIR/mode"; : > "$CSESS_DIR/dirpath"
   if [ "$cur" = "$cwd" ]; then : > "$CSESS_DIR/scope"
   else printf '%s' "$cwd" > "$CSESS_DIR/scope"; fi
   printf 'clear-query+change-prompt(%s)+reload(%s --browse)' \
     "$(csess_prompt)" "$(csess_shquote "$CSESS_SELF")"
 }
 
-# ctrl-o: 디렉토리 목록 뷰로 전환.
-csess_enter_dirs() {
-  printf 'dirs' > "$CSESS_DIR/mode"
-  printf 'clear-query+change-prompt(dir> )+reload(%s --browse)' "$(csess_shquote "$CSESS_SELF")"
+# tab/ctrl-o: 계층 트리 뷰(ROOT=$HOME)로 진입.
+csess_enter_tree() {
+  printf 'tree' > "$CSESS_DIR/mode"
+  : > "$CSESS_DIR/dirpath"
+  printf 'clear-query+change-prompt(%s)+reload(%s --browse)' \
+    "$(csess_prompt)" "$(csess_shquote "$CSESS_SELF")"
 }
 
-# ctrl-a: 전체 세션(스코프/모드 해제)으로.
+# ctrl-h: 트리에서 한 단계 위로 (트리 모드 아니면 no-op).
+csess_tree_up() {
+  local mode pfx par
+  mode=$(cat "$CSESS_DIR/mode" 2>/dev/null)
+  [ "$mode" = "tree" ] || return 0
+  pfx=$(cat "$CSESS_DIR/dirpath" 2>/dev/null); [ -z "$pfx" ] && pfx="$HOME"
+  [ "$pfx" = "$HOME" ] && return 0
+  par="${pfx%/*}"
+  case "$par/" in "$HOME"/*) ;; *) par="$HOME" ;; esac
+  printf '%s' "$par" > "$CSESS_DIR/dirpath"
+  printf 'clear-query+change-prompt(%s)+reload(%s --browse)' \
+    "$(csess_prompt)" "$(csess_shquote "$CSESS_SELF")"
+}
+
+# ctrl-a: 전체 세션(스코프/모드/트리 해제)으로.
 csess_all() {
-  : > "$CSESS_DIR/scope"; : > "$CSESS_DIR/mode"
+  : > "$CSESS_DIR/scope"; : > "$CSESS_DIR/mode"; : > "$CSESS_DIR/dirpath"
   printf 'clear-query+change-prompt(search> )+reload(%s --browse)' "$(csess_shquote "$CSESS_SELF")"
 }
 
@@ -364,10 +511,12 @@ main() {
   case "${1:-}" in
     --index-file)   csess_index_file "$2";        exit 0 ;;
     --preview)      csess_preview "$2";           exit 0 ;;
+    --help-keys)    csess_help_keys;              exit 0 ;;  # fzf ? 키 도움말
     --browse)       csess_browse "${2:-}";        exit 0 ;;  # fzf reload 소스
     --on-enter)     csess_on_enter "${2:-}";      exit 0 ;;  # fzf enter transform
     --toggle-scope) csess_toggle_scope "${2:-}";  exit 0 ;;  # fzf ctrl-g transform
-    --enter-dirs)   csess_enter_dirs;             exit 0 ;;  # fzf ctrl-o transform
+    --enter-tree)   csess_enter_tree;             exit 0 ;;  # fzf tab/ctrl-o transform
+    --tree-up)      csess_tree_up;                exit 0 ;;  # fzf ctrl-h transform
     --all)          csess_all;                    exit 0 ;;  # fzf ctrl-a transform
     -h|--help)
       cat >&2 <<EOF
@@ -380,15 +529,19 @@ csess — Claude 세션 본문 검색 + resume 런처
 
 검색·키:
   (타이핑)  전체 대화 본문에서 검색 — 공백으로 나누면 AND (rg, 없으면 grep)
-  enter    세션 뷰: 그 세션을 resume / 디렉토리 뷰: 그 프로젝트로 진입(드릴다운)
-  tab      resume 대신 'cd .. && claude --resume ..' 명령만 복사
+  enter    세션 뷰: 그 세션을 resume / 트리 뷰: 디렉토리 드릴 또는 세션 resume
+  tab      계층 디렉토리 트리(yazi식) 진입 — enter 로 드릴/resume, ctrl-h/.. 로 상위
+  ctrl-y   resume 대신 'cd .. && claude --resume ..' 명령만 복사
   ctrl-g   호버 세션의 프로젝트로 스코프 토글 (껐다 켰다)
-  ctrl-o   디렉토리(프로젝트) 목록 뷰   ctrl-a  전체로
+  ctrl-h   트리에서 한 단계 위로   ctrl-a  전체로
   ctrl-d/u 미리보기 반페이지 스크롤   ctrl-f/b 한페이지   ctrl-c/esc  종료
+  ?        전체 키 도움말 (fzf 안에서 — 아무 키로 이동하면 닫힘)
 
 환경변수:
-  CSESS_CLAUDE_ROOT   projects 루트 (기본 ~/.claude/projects)
-  CSESS_DRY_RUN       resume 를 exec 하지 않고 명령만 출력
+  CSESS_CLAUDE_ROOT     projects 루트 (기본 ~/.claude/projects)
+  CSESS_DRY_RUN         resume 를 exec 하지 않고 명령만 출력
+  CSESS_NO_BAT          프리뷰 마크다운 색칠에 bat 미사용(plain)
+  CSESS_PREVIEW_BYTES   프리뷰가 jq 로 파싱할 입력 바이트 상한 (기본 500000; 낮추면 스크롤 더 가벼움)
 EOF
       exit 0 ;;
   esac
@@ -408,7 +561,7 @@ EOF
   if command -v rg >/dev/null 2>&1; then CSESS_GREP=$(command -v rg)
   else CSESS_GREP=$(command -v grep); fi
 
-  # [D13] 매-실행 temp dir (idx + scope/mode 상태). trap 으로 정리(exec 경로는
+  # [D13/D14] 매-실행 temp dir (idx + scope/mode/dirpath 상태). trap 으로 정리(exec 경로는
   #   csess_resume 이 직접 rm — exec 은 EXIT trap 을 안 태우므로).
   CSESS_DIR=$(mktemp -d "${TMPDIR:-/tmp}/csess.XXXXXX") || { echo "csess: mktemp failed" >&2; exit 1; }
   trap 'rm -rf "$CSESS_DIR"' EXIT INT TERM
@@ -417,26 +570,37 @@ EOF
   # [D1/D11] fresh 인덱스 빌드 -> temp 파일
   csess_build_index "$self" > "$CSESS_DIR/idx"
   [ -s "$CSESS_DIR/idx" ] || { echo "csess: no sessions found under $CLAUDE_ROOT" >&2; exit 1; }
-  : > "$CSESS_DIR/scope"   # 빈 = 전체
-  : > "$CSESS_DIR/mode"    # 빈 = 세션 뷰
+  : > "$CSESS_DIR/scope"     # 빈 = 전체
+  : > "$CSESS_DIR/mode"      # 빈 = 세션 뷰
+  : > "$CSESS_DIR/dirpath"   # 빈 = 트리 ROOT($HOME)
+
+  # fzf 액션열 transform(...)/reload(...)/change-prompt(...) 는 괄호로 그룹을 닫는다.
+  # self 경로에 () 가 있으면 reload($self_q ...) 안의 ) 가 그룹을 조기 종료 → 바인드 깨짐.
+  # (csess_shquote 는 셸용 따옴표일 뿐 fzf 파서를 못 지킨다.) 드문 케이스라 거부로 막는다.
+  case "$self" in *'('*|*')'*)
+    echo "csess: script path must not contain parentheses (fzf bind 파서 충돌): $self" >&2; exit 1 ;;
+  esac
 
   local self_q; self_q=$(csess_shquote "$self")
 
-  # [D13] fzf 바인드는 변수로 조립한다 (중첩 따옴표 회피). 모든 동적 로직은 self
-  #   서브커맨드로 빼서 bind 문자열을 단순하게 유지 — 각 키는 transform(self --xxx {n}).
+  # [D13/D14] fzf 바인드는 변수로 조립한다 (중첩 따옴표 회피). 모든 동적 로직은 self
+  #   서브커맨드로 빼서 bind 문자열을 단순하게 유지 — 각 키는 transform(self --xxx).
   #   transform 은 서브커맨드 stdout 을 fzf 액션열로 해석한다(reload/change-prompt/accept).
   local binds="change:reload($self_q --browse {q})"
   binds="$binds,ctrl-d:preview-half-page-down,ctrl-u:preview-half-page-up"
   binds="$binds,ctrl-f:preview-page-down,ctrl-b:preview-page-up"
+  binds="$binds,?:preview($self_q --help-keys)"
+  binds="$binds,tab:transform($self_q --enter-tree)"
+  binds="$binds,ctrl-o:transform($self_q --enter-tree)"
+  binds="$binds,ctrl-h:transform($self_q --tree-up)"
   binds="$binds,ctrl-g:transform($self_q --toggle-scope {3})"
-  binds="$binds,ctrl-o:transform($self_q --enter-dirs)"
   binds="$binds,ctrl-a:transform($self_q --all)"
-  binds="$binds,enter:transform($self_q --on-enter {3})"
+  binds="$binds,enter:transform($self_q --on-enter {4})"
 
-  # [D6/D12 표시] --with-nth '6,5,7' = reltime + title(또는 projlabel) + project/count.
+  # [D6/D12 표시] --with-nth '6,5,7' = reltime + title(또는 트리 라벨) + project/count.
   #   --disabled: fzf 자체 매칭 끔 — 검색은 change:reload(--browse) 가 rg 로 한다. [D13]
-  #   --expect=tab,ctrl-y: tab/ctrl-y = 명령 복사(accept+키 보고). enter 는 transform.
-  #   {n} placeholder 는 원본 필드: --preview {4}(path/DIR:), transform {3}(cwd).
+  #   --expect=ctrl-y: ctrl-y = 명령 복사(accept+키 보고). enter/tab 은 transform.
+  #   {n} placeholder 는 원본 필드: --preview {4}(path/TREE/UP), transform {3}(cwd)/{4}(path).
   local out key selected
   out=$(fzf \
     --ansi \
@@ -446,8 +610,8 @@ EOF
     --no-hscroll \
     --reverse \
     --prompt='search> ' \
-    --expect=tab,ctrl-y \
-    --header='타이핑=본문검색(공백=AND) · enter resume/진입 · tab 복사 · ctrl-g 프로젝트토글 · ctrl-o 디렉토리 · ctrl-a 전체 · ctrl-d/u 스크롤' \
+    --expect=ctrl-y \
+    --header='타이핑=검색 · enter 진입 · tab 트리 · ? 도움말' \
     --bind="$binds" \
     --preview="$self_q --preview {4}" \
     --preview-window='right,55%,wrap' \
@@ -460,14 +624,14 @@ EOF
   key=$(printf '%s' "$out"  | head -1)
   selected=$(printf '%s' "$out" | tail -n +2)
   [ -n "$selected" ] || exit 0
-  # tab/ctrl-y => resume 대신 명령 복사(do_copy). enter => 그대로 resume.
-  case "$key" in tab|ctrl-y) do_copy=1 ;; esac
+  # ctrl-y => resume 대신 명령 복사(do_copy). enter => 그대로 resume.
+  case "$key" in ctrl-y) do_copy=1 ;; esac
 
   local id cwd
   id=$(printf '%s' "$selected"  | awk -F"$TAB" '{print $2}')
   cwd=$(printf '%s' "$selected" | awk -F"$TAB" '{print $3}')
 
-  # 디렉토리 라인(id 없음) 이나 빈 선택은 조용히 종료. [D13]
+  # 트리 행(id 없음: UP/DIR) 이나 빈 선택은 조용히 종료. [D14]
   [ -n "$id" ] || exit 0
 
   csess_resume "$id" "$cwd" "$do_copy"
