@@ -27,12 +27,3 @@
   실측(2026-06-01): resume 가능 세션 ~255–259개 / 45개 프로젝트 (전체 ~496 JSONL 중 ~241개가 서브에이전트 저널).
 - **Codex:** `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`. `cwd`·`id`가 `session_meta`
   라인의 `.payload` 아래. resume은 `codex resume <uuid>` (명시 UUID면 picker 건너뜀).
-
-## Skill routing
-
-요청이 스킬과 맞으면 Skill 도구로 먼저 호출한다.
-- 버그/에러/"왜 안 되지" → `/investigate`
-- ship/PR/배포 → `/ship`
-- QA/테스트 → `/qa`
-- 코드 리뷰/diff 확인 → `/review`
-- 아키텍처 리뷰 → `/plan-eng-review`

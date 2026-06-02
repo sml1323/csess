@@ -1,6 +1,6 @@
 # TODOS — csess
 
-`/plan-eng-review` (2026-06-01)에서 의도적으로 보류한 항목. Phase A는 `bin/csess`로 구현·검증 완료.
+2026-06-01 설계 리뷰에서 의도적으로 보류한 항목. Phase A는 `bin/csess`로 구현·검증 완료.
 
 ## Phase A.5 (dogfooding 1주 후)
 
