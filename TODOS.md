@@ -38,7 +38,7 @@
 - **Codex 주입 프리픽스:** **57/411 세션**의 첫 user_message 가 사용자 설정 가드(`IMPORTANT: Do NOT read or execute any files under ~/.claude/...`)로 시작하고 그 **뒤에 실제 질문**이 붙음 → 제목이 가드로 뜸. 파서는 spec(첫 user_message)을 정확히 추출하므로 버그 아님; 정밀화는 **알려진 주입 프리픽스 strip**(라인 스킵 아님 — 메시지 내부 프리픽스라 본문 검색엔 영향 없음). 사용자-환경 특수값이라 향후 설정 가능한 strip 패턴으로.
 - **Codex 단문 제목:** 제목 `.`(20), 슬래시명 그대로(`code-review` 4 — Codex는 슬래시를 평문 저장) 등. 표시 보강 여지(낮은 우선순위).
 
-### Phase B 착수 전 확인 (2026-06-01 `/deep-research` — [research/2026-06-01-tui-prior-art.md](research/2026-06-01-tui-prior-art.md))
+### Phase B 착수 전 확인 (2026-06-01 prior-art 리서치)
 - **prior art 재확인 필수:** `raine/claude-history`·`chronologos/cc-sessions`가 Phase B와 거의 동일(둘 다 Claude 전용).
   경쟁 도구가 빠르게 움직이므로 착수 직전 재확인 — 차별점은 **Codex 합류**뿐. B는 "도구 필요"가 아니라 **학습 + Codex**로만 정당화.
 - **fork vs scratch 결정:** claude-history fork(Codex 파서만 추가) = 빠름 / 처음부터 = 학습 가치. 학습 동기 확인 후 택1.
