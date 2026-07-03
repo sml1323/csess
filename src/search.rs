@@ -19,9 +19,15 @@ pub fn build_haystacks(rows: &[SessionRow]) -> Vec<String> {
         .collect()
 }
 
+/// 쿼리 → 검색어 목록(공백 분리 + 소문자). 빈/공백만 → 빈 Vec.
+/// 검색(`filter`)·앵커·하이라이트가 **같은 규칙**을 쓰도록 단일 진입점. [search-hit-preview]
+pub fn terms(query: &str) -> Vec<String> {
+    query.split_whitespace().map(|t| t.to_lowercase()).collect()
+}
+
 /// 쿼리(공백 분리=AND)로 통과하는 row 인덱스. 입력 순서(mtime desc) 보존. 빈 쿼리=전체.
 pub fn filter(haystacks: &[String], query: &str) -> Vec<usize> {
-    let terms: Vec<String> = query.split_whitespace().map(|t| t.to_lowercase()).collect();
+    let terms = terms(query);
     (0..haystacks.len())
         .filter(|&i| terms.iter().all(|t| haystacks[i].contains(t.as_str())))
         .collect()
@@ -43,6 +49,14 @@ mod tests {
             proj: "p".into(),
             body: body.into(),
         }
+    }
+
+    #[test]
+    fn terms_split_lowercase() {
+        assert_eq!(terms("Auth JWT"), vec!["auth", "jwt"]);
+        assert_eq!(terms("  토큰   검증 "), vec!["토큰", "검증"]);
+        assert!(terms("   ").is_empty());
+        assert!(terms("").is_empty());
     }
 
     #[test]

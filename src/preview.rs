@@ -9,7 +9,7 @@
 
 use crate::model::Source;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use serde_json::Value;
 
 /// 프리뷰가 파싱할 입력 바이트 상한(거대 세션 글랜스). Phase A `CSESS_PREVIEW_BYTES`(기본 500KB). [D14]
@@ -272,9 +272,127 @@ pub fn render_session(path: &str, source: Source) -> Vec<Line<'static>> {
     render_turns(&turns, source)
 }
 
+// ---- 검색 매치 앵커 (search-hit-preview) ----
+
+/// `Line` 의 평문(스팬 content 이어붙임). 매치 스캔·앵커 계산의 대상 텍스트.
+fn line_plain(line: &Line) -> String {
+    line.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+/// term(이미 소문자, `search::terms`) 하나 이상 포함하는 렌더 라인 인덱스(오름차순, 대소문자 무시).
+/// 매치를 **렌더된 라인**에서 찾으므로, 검색 코퍼스에만 있고 프리뷰엔 안 보이는 매치는 자연히 제외(top 폴백). [D2]
+pub fn match_lines(lines: &[Line<'_>], terms: &[String]) -> Vec<usize> {
+    if terms.is_empty() {
+        return Vec::new();
+    }
+    lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| {
+            let plain = line_plain(l).to_lowercase();
+            terms.iter().any(|t| plain.contains(t.as_str())).then_some(i)
+        })
+        .collect()
+}
+
+/// 첫 매치 라인 - `lead_in`(위쪽 맥락 줄 수, saturating). 무매치/빈 terms → 0(top 폴백). [D1/D7]
+pub fn anchor_scroll(lines: &[Line<'_>], terms: &[String], lead_in: u16) -> u16 {
+    match match_lines(lines, terms).first() {
+        Some(&i) => (i.min(u16::MAX as usize) as u16).saturating_sub(lead_in),
+        None => 0,
+    }
+}
+
+// ---- 검색 매치 하이라이트 (search-hit-preview) ----
+
+/// `content` 안에서 terms(소문자) 중 하나라도 대소문자 무시 매치하는 **원본 바이트 구간**들(병합·정렬).
+/// `to_lowercase()` 가 바이트 길이를 바꿀 수 있어(예: ß→ss, İ), 소문자 문자열의 각 바이트를
+/// 원본 오프셋으로 되매핑해 슬라이스가 항상 원본의 char 경계에 떨어지게 한다(패닉 방지). [D5]
+fn match_ranges(content: &str, terms: &[String]) -> Vec<(usize, usize)> {
+    let mut low = String::with_capacity(content.len());
+    let mut map: Vec<usize> = Vec::with_capacity(content.len() + 1); // low 의 각 바이트 → 원본 바이트 offset
+    for (off, ch) in content.char_indices() {
+        for lc in ch.to_lowercase() {
+            let mut buf = [0u8; 4];
+            let enc = lc.encode_utf8(&mut buf);
+            for _ in 0..enc.len() {
+                map.push(off);
+            }
+            low.push_str(enc);
+        }
+    }
+    let orig_end = |low_off: usize| if low_off < map.len() { map[low_off] } else { content.len() };
+
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for term in terms {
+        if term.is_empty() {
+            continue;
+        }
+        let mut from = 0usize;
+        while let Some(rel) = low[from..].find(term.as_str()) {
+            let ls = from + rel;
+            let le = ls + term.len();
+            ranges.push((map[ls], orig_end(le)));
+            from = le;
+        }
+    }
+    if ranges.is_empty() {
+        return ranges;
+    }
+    ranges.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+    for (s, e) in ranges {
+        match merged.last_mut() {
+            Some(last) if s <= last.1 => last.1 = last.1.max(e),
+            _ => merged.push((s, e)),
+        }
+    }
+    merged
+}
+
+/// 한 라인의 각 스팬을 매치 경계로 분할 — 매치 구간은 `base.patch(match_hl)`, 주변은 base 유지.
+fn highlight_line(line: &Line<'static>, terms: &[String]) -> Line<'static> {
+    let hl = crate::theme::match_hl();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for span in &line.spans {
+        let content = span.content.as_ref();
+        let ranges = match_ranges(content, terms);
+        if ranges.is_empty() {
+            spans.push(span.clone());
+            continue;
+        }
+        let base = span.style;
+        let mut cur = 0usize;
+        for (s, e) in ranges {
+            if s > cur {
+                spans.push(Span::styled(content[cur..s].to_string(), base));
+            }
+            spans.push(Span::styled(content[s..e].to_string(), base.patch(hl)));
+            cur = e;
+        }
+        if cur < content.len() {
+            spans.push(Span::styled(content[cur..].to_string(), base));
+        }
+    }
+    let mut out = Line::from(spans);
+    out.alignment = line.alignment;
+    out.style = line.style;
+    out
+}
+
+/// base 라인들 → 매치 substring 을 하이라이트 스팬으로 분할한 라인들.
+/// terms 비면 입력 그대로 clone. 평문(스팬 content 이어붙임)은 항상 보존. [D5]
+pub fn highlight_lines(lines: &[Line<'static>], terms: &[String]) -> Vec<Line<'static>> {
+    if terms.is_empty() {
+        return lines.to_vec();
+    }
+    lines.iter().map(|l| highlight_line(l, terms)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::match_hl;
 
     #[test]
     fn claude_collapses_tool_and_thinking() {
@@ -327,5 +445,83 @@ mod tests {
             .join("|");
         assert!(flat.contains("▌ Codex"));
         assert!(flat.contains("코덱스 답변"));
+    }
+
+    #[test]
+    fn match_lines_indices_case_insensitive_multiterm() {
+        let lines = vec![
+            Line::from("첫 줄"),         // 0
+            Line::from("JWT 토큰 검증"), // 1
+            Line::from("관련 없음"),     // 2
+            Line::from("다시 jwt 나옴"), // 3
+        ];
+        // 단일어, 대소문자 무시
+        assert_eq!(match_lines(&lines, &["jwt".to_string()]), vec![1, 3]);
+        // 다중어 → 어느 term이든 포함 라인, 오름차순(첫=가장 이른 인덱스)
+        assert_eq!(
+            match_lines(&lines, &["첫".to_string(), "jwt".to_string()]),
+            vec![0, 1, 3]
+        );
+        // 무매치 / 빈 terms
+        assert!(match_lines(&lines, &["없는단어".to_string()]).is_empty());
+        assert!(match_lines(&lines, &[]).is_empty());
+    }
+
+    #[test]
+    fn anchor_scroll_first_match_with_lead_in() {
+        let mut lines: Vec<Line> = (0..20).map(|i| Line::from(format!("filler {i}"))).collect();
+        lines[7] = Line::from("여기 auth 매치");
+        // 첫 매치 7, lead_in 2 → 5
+        assert_eq!(anchor_scroll(&lines, &["auth".to_string()], 2), 5);
+        // 첫 매치가 0 이면 saturating → 0
+        lines[0] = Line::from("auth 맨 위");
+        assert_eq!(anchor_scroll(&lines, &["auth".to_string()], 2), 0);
+        // 무매치 / 빈 terms → 0
+        assert_eq!(anchor_scroll(&lines, &["없음".to_string()], 2), 0);
+        assert_eq!(anchor_scroll(&lines, &[], 2), 0);
+    }
+
+    fn plain_of(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn highlight_splits_match_and_preserves_plaintext() {
+        let out = highlight_lines(&[Line::from("토큰 JWT 검증")], &["jwt".to_string()]);
+        assert_eq!(out.len(), 1);
+        let spans = &out[0].spans;
+        // "토큰 " / "JWT"(하이라이트) / " 검증"
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[1].content.as_ref(), "JWT"); // 원본 대소문자 보존
+        assert_eq!(plain_of(&out[0]), "토큰 JWT 검증"); // 평문 보존
+        assert_eq!(spans[1].style.bg, match_hl().bg); // 매치에 하이라이트 배경
+    }
+
+    #[test]
+    fn highlight_preserves_base_style_multiterm_and_empty() {
+        // heading 스타일 라인 → 매치에 하이라이트 오버레이, base(heading) 유지(patch)
+        let out = highlight_lines(
+            &[Line::from(Span::styled("## auth 설정", heading_style()))],
+            &["auth".to_string()],
+        );
+        assert_eq!(plain_of(&out[0]), "## auth 설정");
+        let m = out[0].spans.iter().find(|s| s.content.as_ref() == "auth").unwrap();
+        assert_eq!(m.style.bg, match_hl().bg); // 하이라이트 배경
+        assert_eq!(m.style.fg, match_hl().fg); // patch 로 fg 도 덮임(가독)
+        let base = out[0].spans.iter().find(|s| s.content.as_ref() == "## ").unwrap();
+        assert_eq!(base.style.fg, heading_style().fg); // 주변은 heading base 유지
+
+        // 다중어 → 둘 다 강조
+        let out2 = highlight_lines(
+            &[Line::from("토큰 검증 완료")],
+            &["토큰".to_string(), "검증".to_string()],
+        );
+        let hl_count = out2[0].spans.iter().filter(|s| s.style.bg == match_hl().bg).count();
+        assert_eq!(hl_count, 2);
+
+        // 빈 terms → 입력 그대로(분할 없음)
+        let out3 = highlight_lines(&[Line::from("변화 없음")], &[]);
+        assert_eq!(out3[0].spans.len(), 1);
+        assert_eq!(plain_of(&out3[0]), "변화 없음");
     }
 }

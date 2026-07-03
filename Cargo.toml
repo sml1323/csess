@@ -17,6 +17,7 @@ regex = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 ratatui = "0.30.0"
 pulldown-cmark = "0.13.4"
+unicode-width = "0.2" # 검색 입력 커서 위치(CJK 표시폭) — IME 조합중 글자 인라인 표시
 
 [profile.release]
 lto = true

@@ -4,7 +4,7 @@
 //! 호버 세션의 소스색을 따라가고(`tui::App::accent`), 디렉토리/소스없는 행은 [`NEUTRAL`].
 
 use crate::model::Source;
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier, Style};
 
 /// Claude = Anthropic 테라코타 주황.
 pub const CLAUDE: Color = Color::Rgb(217, 119, 87);
@@ -28,4 +28,13 @@ pub fn source_color_e(source: Source) -> Color {
         Source::Codex => CODEX,
         Source::Claude => CLAUDE,
     }
+}
+
+/// 검색 매치 하이라이트 — 노랑 배경 + 검정 글씨 + 볼드. 듀얼톤(라이트/다크) 무관하게 가독.
+/// base 스타일에 `patch` 로 얹어 매치 substring 만 이 색으로 덮는다(주변 스팬은 base 유지). [search-hit-preview]
+pub fn match_hl() -> Style {
+    Style::default()
+        .fg(Color::Black)
+        .bg(Color::Rgb(240, 200, 80))
+        .add_modifier(Modifier::BOLD)
 }

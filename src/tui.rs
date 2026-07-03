@@ -12,12 +12,13 @@ use crate::model::{self, Source};
 use crate::tree::{self, ListItem, ViewMode};
 use crate::{preview, search, theme};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Position};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem as UiListItem, ListState, Paragraph};
 use ratatui::Frame;
 use std::collections::HashMap;
+use unicode_width::UnicodeWidthStr;
 
 /// 소스 필터(ctrl-s 토글) — 전체 / Claude만 / Codex만. flat·tree 양쪽에 적용. [D14 후속]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +53,9 @@ pub enum Outcome {
     Copy(SessionRow),
 }
 
+/// 앵커 시 매치 줄 위로 함께 보여줄 맥락 줄 수. [D7]
+const LEAD_IN: u16 = 2;
+
 pub struct App {
     rows: Vec<SessionRow>,
     haystacks: Vec<String>,
@@ -59,6 +63,7 @@ pub struct App {
     items: Vec<ListItem>, // 현재 보이는 행(Flat=세션만, Tree=UP/Dir/세션 혼합)
     sel: usize,           // items 인덱스
     preview_cache: HashMap<String, Vec<Line<'static>>>,
+    hl_cache: HashMap<String, Vec<Line<'static>>>, // (path,query) → 하이라이트 라인. 스크롤 idle 유지. [D6]
     preview_scroll: u16,
     now: i64,
     home: String,         // $HOME (트리 루트)
@@ -78,6 +83,7 @@ impl App {
             items: Vec::new(),
             sel: 0,
             preview_cache: HashMap::new(),
+            hl_cache: HashMap::new(),
             preview_scroll: 0,
             now,
             home,
@@ -99,7 +105,7 @@ impl App {
         if self.sel >= self.items.len() {
             self.sel = self.items.len().saturating_sub(1);
         }
-        self.preview_scroll = 0;
+        self.preview_scroll = self.anchor_for_selection();
     }
 
     /// Flat: 소스 필터 → 스코프 필터 → 본문 AND 검색(mtime desc 보존). 전부 Session 항목.
@@ -137,9 +143,83 @@ impl App {
         }
     }
 
+    /// 현재 선택(세션)+비빈 쿼리면 캐시된 base 프리뷰 라인에서 첫 매치로 앵커할 스크롤. 아니면 0.
+    /// `recompute()`/`move_sel()` 의 스크롤 리셋을 대체. Ctrl+D/U 는 이걸 안 거치므로 수동 스크롤 우선. [D3]
+    fn anchor_for_selection(&mut self) -> u16 {
+        let terms = search::terms(&self.query);
+        if terms.is_empty() {
+            return 0;
+        }
+        let (path, src) = match self.items.get(self.sel) {
+            Some(ListItem::Session { row_idx }) => {
+                let r = &self.rows[*row_idx];
+                let src = if r.source == "codex" {
+                    Source::Codex
+                } else {
+                    Source::Claude
+                };
+                (r.path.clone(), src)
+            }
+            _ => return 0,
+        };
+        // base(하이라이트 없는) 라인 캐시에서 매치 위치 계산 — 검색 haystack 아니라 렌더 텍스트 기준. [D2]
+        let lines = self
+            .preview_cache
+            .entry(path.clone())
+            .or_insert_with(|| preview::render_session(&path, src));
+        preview::anchor_scroll(lines, &terms, LEAD_IN)
+    }
+
+    /// Alt+n(dir=1)/Alt+p(dir=-1): 현재 세션 매치들에서 현 스크롤 기준 다음/이전 매치로 앵커(순환).
+    /// 세션 아님·빈 쿼리·매치 0개면 no-op. [D8]
+    fn jump_match(&mut self, dir: i32) {
+        let terms = search::terms(&self.query);
+        if terms.is_empty() {
+            return;
+        }
+        let (path, src) = match self.items.get(self.sel) {
+            Some(ListItem::Session { row_idx }) => {
+                let r = &self.rows[*row_idx];
+                let src = if r.source == "codex" {
+                    Source::Codex
+                } else {
+                    Source::Claude
+                };
+                (r.path.clone(), src)
+            }
+            _ => return,
+        };
+        let lines = self
+            .preview_cache
+            .entry(path.clone())
+            .or_insert_with(|| preview::render_session(&path, src));
+        let matches = preview::match_lines(lines, &terms);
+        if matches.is_empty() {
+            return;
+        }
+        // 현재 앵커된 매치 위치 추정 = scroll + LEAD_IN. 이보다 다음/이전 매치로 이동(끝에서 순환).
+        let cur = self.preview_scroll as usize + LEAD_IN as usize;
+        let target = if dir > 0 {
+            matches
+                .iter()
+                .copied()
+                .find(|&m| m > cur)
+                .unwrap_or(matches[0])
+        } else {
+            matches
+                .iter()
+                .rev()
+                .copied()
+                .find(|&m| m < cur)
+                .unwrap_or_else(|| *matches.last().unwrap())
+        };
+        self.preview_scroll = (target.min(u16::MAX as usize) as u16).saturating_sub(LEAD_IN);
+    }
+
     /// 순수 키 핸들러. 종료 액션이면 Some(Outcome). 새 ctrl 암은 `Char(c) if !ctrl` catch-all **앞**.
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Outcome> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
             KeyCode::Esc => return Some(Outcome::Quit),
             KeyCode::Char('c') if ctrl => return Some(Outcome::Quit),
@@ -162,11 +242,14 @@ impl App {
             KeyCode::Char('p') if ctrl => self.move_sel(-1),
             KeyCode::Char('d') if ctrl => self.preview_scroll = self.preview_scroll.saturating_add(10),
             KeyCode::Char('u') if ctrl => self.preview_scroll = self.preview_scroll.saturating_sub(10),
+            // 매치 순회(P3). 평문 글자는 쿼리로 새므로 Alt 모디파이어 사용. [D8]
+            KeyCode::Char('n') if alt => self.jump_match(1),
+            KeyCode::Char('p') if alt => self.jump_match(-1),
             KeyCode::Backspace => {
                 self.query.pop();
                 self.recompute();
             }
-            KeyCode::Char(c) if !ctrl => {
+            KeyCode::Char(c) if !ctrl && !alt => {
                 self.query.push(c);
                 self.recompute();
             }
@@ -279,7 +362,7 @@ impl App {
         let next = (self.sel as i32 + delta).clamp(0, max as i32) as usize;
         if next != self.sel {
             self.sel = next;
-            self.preview_scroll = 0;
+            self.preview_scroll = self.anchor_for_selection();
         }
     }
 
@@ -302,11 +385,27 @@ impl App {
             None => Kind::None,
         };
         match kind {
-            Kind::Session(path, src) => self
-                .preview_cache
-                .entry(path.clone())
-                .or_insert_with(|| preview::render_session(&path, src))
-                .clone(),
+            Kind::Session(path, src) => {
+                let terms = search::terms(&self.query);
+                let key = format!("{path}\u{0}{}", self.query);
+                // 하이라이트 캐시 히트(스크롤 중 query 불변) → base 재클론 없이 반환. [D6]
+                if !terms.is_empty() {
+                    if let Some(hl) = self.hl_cache.get(&key) {
+                        return hl.clone();
+                    }
+                }
+                let base = self
+                    .preview_cache
+                    .entry(path.clone())
+                    .or_insert_with(|| preview::render_session(&path, src))
+                    .clone();
+                if terms.is_empty() {
+                    return base;
+                }
+                let hl = preview::highlight_lines(&base, &terms);
+                self.hl_cache.insert(key, hl.clone());
+                hl
+            }
             Kind::Dir(node) => {
                 if let Some(c) = self.preview_cache.get(&node) {
                     return c.clone();
@@ -369,8 +468,9 @@ impl App {
             ViewMode::Tree => "enter=drill/resume · ctrl-h=up · ctrl-s=source · ctrl-a=all · esc=quit",
             ViewMode::Flat => "enter=resume · tab=tree · ctrl-g=scope · ctrl-s=source · esc=quit",
         };
+        let prompt = self.prompt_label();
         let header = Line::from(vec![
-            Span::styled(self.prompt_label(), Style::default().fg(accent)),
+            Span::styled(prompt.clone(), Style::default().fg(accent)),
             Span::raw(self.query.clone()),
             Span::styled(
                 format!("    [{count}]  {hint}"),
@@ -378,6 +478,14 @@ impl App {
             ),
         ]);
         f.render_widget(Paragraph::new(header), chunks[0]);
+        // 커서를 프롬프트+쿼리 끝 칸에 둔다 → 한글/CJK IME 의 조합중(preedit) 글자가 그 자리에
+        // 인라인으로 보인다(안 그러면 커서 숨김 → 조합 완료돼야만 나타남). 표시폭으로 계산(CJK 2칸). [search-hit-preview]
+        let cw = (prompt.width() + self.query.width()).min(u16::MAX as usize) as u16;
+        let cx = chunks[0]
+            .x
+            .saturating_add(cw)
+            .min(chunks[0].right().saturating_sub(1));
+        f.set_cursor_position(Position::new(cx, chunks[0].y));
 
         let body = Layout::default()
             .direction(Direction::Horizontal)
@@ -584,6 +692,9 @@ mod tests {
     fn ctrl(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
+    fn alt(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT)
+    }
     fn plain(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -779,5 +890,103 @@ mod tests {
         term.draw(|f| app.render(f)).unwrap();
         let s: String = term.backend().buffer().content().iter().map(|c| c.symbol()).collect();
         assert!(s.contains("work/a>")); // proj_label 프롬프트
+    }
+
+    fn plain_line(l: &Line) -> String {
+        l.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn anchor_jumps_to_body_match_and_manual_scroll_wins() {
+        let mut app = app();
+        // sel=0 세션의 base 프리뷰 라인을 캐시에 시드(파일 I/O 회피). "auth" 를 idx7 에 배치.
+        let path = "/no/such/path.jsonl".to_string();
+        let mut lines: Vec<Line> = (0..20).map(|i| Line::from(format!("filler {i}"))).collect();
+        lines[7] = Line::from("여기 auth 매치");
+        app.preview_cache.insert(path, lines);
+        // "auth" 는 row0 title("alpha auth jwt")에도 있어 리스트에 남고, 캐시 본문 idx7 에도 있음
+        for c in "auth".chars() {
+            app.handle_key(key(c));
+        }
+        assert_eq!(app.sel, 0);
+        assert_eq!(app.preview_scroll, 5); // 7 - LEAD_IN(2)
+        // Ctrl+D → 수동 스크롤 우선(재앵커 안 함)
+        app.handle_key(ctrl('d'));
+        assert_eq!(app.preview_scroll, 15); // 5 + 10
+        // 쿼리 변경(backspace) → 재앵커
+        app.handle_key(plain(KeyCode::Backspace)); // "aut", 여전히 idx7 매치
+        assert_eq!(app.preview_scroll, 5);
+    }
+
+    #[test]
+    fn no_anchor_on_empty_query_or_title_only_match() {
+        let mut app = app();
+        // 빈 쿼리 → 0
+        assert_eq!(app.anchor_for_selection(), 0);
+        // 제목만 매치(본문 캐시엔 없음) → top 폴백(0). [F3 / FR-006 / FR-007]
+        let path = "/no/such/path.jsonl".to_string();
+        app.preview_cache.insert(path, vec![Line::from("본문엔 매치 없음")]);
+        for c in "auth".chars() {
+            app.handle_key(key(c));
+        }
+        assert_eq!(app.sel, 0); // "auth" 는 title 매치라 리스트 유지
+        assert_eq!(app.preview_scroll, 0); // 본문 렌더엔 매치 없음 → 앵커 0
+    }
+
+    #[test]
+    fn preview_highlights_match_and_caches_by_path_query() {
+        let mut app = app();
+        let path = "/no/such/path.jsonl".to_string();
+        app.preview_cache.insert(path.clone(), vec![Line::from("auth 라인")]);
+        for c in "auth".chars() {
+            app.handle_key(key(c));
+        }
+        // 첫 preview_content → 하이라이트 적용 + (path,query) 캐시 채움
+        let first = app.preview_content();
+        assert!(first[0].spans.iter().any(|s| s.style.bg == theme::match_hl().bg));
+        assert!(app.hl_cache.contains_key(&format!("{path}\u{0}auth")));
+        // 두 번째(스크롤 상당) → 캐시 히트, 동일 결과
+        let second = app.preview_content();
+        assert_eq!(plain_line(&second[0]), plain_line(&first[0]));
+    }
+
+    #[test]
+    fn alt_n_p_navigate_matches_and_dont_leak() {
+        let mut app = app();
+        let path = "/no/such/path.jsonl".to_string();
+        // "auth" 를 idx 3, 8, 14 에 배치
+        let mut lines: Vec<Line> = (0..20).map(|i| Line::from(format!("filler {i}"))).collect();
+        for &i in &[3usize, 8, 14] {
+            lines[i] = Line::from("auth 여기");
+        }
+        app.preview_cache.insert(path, lines);
+        for c in "auth".chars() {
+            app.handle_key(key(c));
+        }
+        assert_eq!(app.preview_scroll, 1); // 첫 매치 3 - LEAD_IN(2)
+        app.handle_key(alt('n'));
+        assert_eq!(app.preview_scroll, 6); // 8 - 2
+        app.handle_key(alt('n'));
+        assert_eq!(app.preview_scroll, 12); // 14 - 2
+        app.handle_key(alt('n'));
+        assert_eq!(app.preview_scroll, 1); // 순환 → 첫 매치
+        app.handle_key(alt('p'));
+        assert_eq!(app.preview_scroll, 12); // 이전(순환) → 마지막 매치
+        assert_eq!(app.query, "auth"); // Alt+n/p 는 쿼리에 안 샘
+    }
+
+    #[test]
+    fn cursor_sits_at_query_end_for_ime() {
+        let backend = TestBackend::new(100, 20);
+        let mut term = Terminal::new(backend).unwrap();
+        let mut app = app();
+        for c in "가나".chars() {
+            app.handle_key(key(c));
+        }
+        term.draw(|f| app.render(f)).unwrap();
+        // "search> "(8칸) + "가나"(CJK 2×2=4칸) → 커서 x=12, 헤더 행 y=0
+        // → IME 조합중 글자가 이 자리에 인라인으로 표시됨.
+        let pos = term.get_cursor_position().unwrap();
+        assert_eq!((pos.x, pos.y), (12, 0));
     }
 }

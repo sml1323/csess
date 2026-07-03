@@ -11,5 +11,9 @@
 # 로컬 전용 (리서치 산출물·데모 데이터)
 docs/research/
 
+# spec-kit 스캐폴딩 (로컬 전용 — 설계 산출물은 specs/ 에 커밋)
+.specify/
+.claude/
+
 # rust
 # (Cargo.lock 은 바이너리 크레이트라 재현 빌드 위해 커밋 — 의도적으로 무시 안 함)
