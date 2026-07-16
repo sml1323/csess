@@ -4,7 +4,7 @@ Claude Code / Codex 세션을 **대화 내용으로 검색**하고 엔터 한 �
 
 ![csess — 본문 검색 + 미리보기](docs/img/list-preview.png)
 
-`claude --resume` 은 현재 디렉토리의 세션만, 그것도 내용 검색 없이 보여준다. `csess` 는 `~/.claude/projects` 와 `~/.codex/sessions` 에 흩어진 **모든 세션을 한 화면에** 모아 — 파일명이 아니라 **대화 안의 말**로 찾고, 고르면 올바른 작업 디렉토리로 `cd` 한 뒤 그 세션을 resume 한다. Claude 는 주황 `c`, Codex 는 그린 `ⓒ` 로 구분.
+`claude --resume` 은 현재 디렉토리의 세션만, 그것도 내용 검색 없이 보여준다. `csess` 는 `~/.claude/projects` 와 `~/.codex/sessions` 에 흩어진 **모든 세션을 한 화면에** 모아 — 파일명이 아니라 **대화 안의 말**로 찾고, 고르면 올바른 작업 디렉토리로 `cd` 한 뒤 그 세션을 resume 한다. Claude 는 주황 `c`, Codex 는 그린 `x` 로 구분.
 
 ## 설치
 
@@ -39,20 +39,26 @@ csess -h           # 도움말
 
 ### 키
 
+전체 키맵은 TUI 안에서 `F1`(또는 `alt-h`)로 볼 수 있다.
+
 | 키 | 동작 |
 |------|------|
-| _(타이핑)_ | 본문 검색 (공백 = AND) · 미리보기는 첫 매치로 점프 + 매치 강조 · 트리에선 라벨/제목 필터 |
+| _(타이핑)_ | 본문 검색 (공백 = AND) · 미리보기는 첫 매치로 점프 + 매치 강조(리스트 제목도) · 트리에선 라벨/제목 필터 |
 | `enter` | 세션 resume · 트리에선 디렉토리 드릴 / 세션 resume |
-| `↑`/`↓` · `ctrl-p`/`ctrl-n` | 이동 |
+| `↑`/`↓` · `ctrl-p`/`ctrl-n` | 이동 (`PgUp`/`PgDn` 페이지 · `Home`/`End` 처음/끝) |
 | `tab` · `ctrl-o` | 계층 디렉토리 트리 진입 |
-| `ctrl-h` | 트리에서 상위로 |
-| `ctrl-g` | 호버 세션의 프로젝트로 스코프 토글 |
-| `ctrl-s` | 소스 필터 순환 (전체 → Claude → Codex) |
+| `ctrl-h` · `backspace`(빈 쿼리) | 트리에서 상위로 |
+| `ctrl-g` | 호버 세션의 프로젝트로 스코프 토글 (검색어 유지) |
+| `ctrl-s` | 소스 필터 순환 (전체 → Claude → Codex) — 활성 필터는 헤더 우측 필로 표시 |
 | `ctrl-a` | 전체로 리셋 (스코프·필터·트리 해제) |
-| `ctrl-y` | resume 대신 `cd && claude/codex resume` 명령 복사 |
-| `ctrl-d` / `ctrl-u` | 미리보기 ↓/↑ 스크롤 |
-| `alt-n` / `alt-p` | 미리보기에서 다음/이전 검색 매치로 이동 |
+| `ctrl-y` | `cd && claude/codex resume` 명령 복사 (앱 유지, 푸터에 확인 표시) |
+| `ctrl-w` · `alt-backspace` | 검색어 마지막 단어 삭제 |
+| `ctrl-d` / `ctrl-u` | 미리보기 ↓/↑ 스크롤 (끝에서 멈춤, 우측 스크롤바) |
+| `alt-n` / `alt-p` · `F3` | 다음/이전 검색 매치로 이동 — 미리보기 타이틀에 `매치 k/N` |
+| `F1` · `alt-h` | 키맵 오버레이 |
 | `esc` / `ctrl-c` | 종료 |
+
+macOS 기본 터미널에서 `alt-*` 는 Option 을 Meta 로 설정해야 한다 (iTerm2: *Use Option as Meta*). 안 되면 `F3` 이 매치 이동을 대신한다.
 
 ### 환경변수
 

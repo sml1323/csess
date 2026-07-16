@@ -31,8 +31,10 @@ Sleep 1.6s
 Show
 Sleep 400ms
 
-# 1. hero — flat list (dual-tone c/ⓒ) + rich preview
+# 1. hero — flat list (dual-tone c/x) + rich preview + 빈쿼리 placeholder
 Screenshot "docs/img/list-preview.png"
+# VHS 캡처가 한 프레임 늦게 잡히는 오버슛 대비 — 다음 타이핑 전에 idle 프레임 확보
+Sleep 1.2s
 
 # 2. body search — narrow to one session
 # trailing space forces the final 'h' to repaint (VHS drops the last keystroke's

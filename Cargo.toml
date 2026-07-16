@@ -16,8 +16,8 @@ serde_json = "1"
 regex = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 ratatui = "0.30.0"
-pulldown-cmark = "0.13.4"
-unicode-width = "0.2" # 검색 입력 커서 위치(CJK 표시폭) — IME 조합중 글자 인라인 표시
+unicode-width = "0.2" # CJK 표시폭 — IME 커서 위치 · 리스트 truncation · 프리뷰 word-wrap
+unicode-segmentation = "1" # 프리뷰 word-wrap 의 grapheme 단위 분할 (ZWJ/VS16 이모지 클러스터 보존)
 
 [profile.release]
 lto = true

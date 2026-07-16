@@ -51,8 +51,8 @@ pub fn command_string(row: &SessionRow, cwd: &str) -> String {
     format!("cd {} && {} {} {}", shq(cwd), prog, flag, shq(&row.id))
 }
 
-/// pbcopy 로 클립보드 복사 (macOS). 실패 시 false.
-fn copy_to_clipboard(text: &str) -> bool {
+/// pbcopy 로 클립보드 복사 (macOS). 실패 시 false. (TUI 의 ctrl-y 인앱 복사가 사용)
+pub fn copy_to_clipboard(text: &str) -> bool {
     use std::io::Write;
     use std::process::Stdio;
     if let Ok(mut child) = Command::new("pbcopy").stdin(Stdio::piped()).spawn() {
@@ -65,20 +65,12 @@ fn copy_to_clipboard(text: &str) -> bool {
     }
 }
 
-/// 선택 세션 resume 실행. copy=true 면 명령만 클립보드로(exec 안 함).
+/// 선택 세션 resume 실행. (복사는 TUI 인앱 — `copy_to_clipboard` + `command_string` 조합)
 /// CSESS_DRY_RUN 이면 명령을 stdout 으로 출력하고 반환. 성공 exec 는 반환하지 않음.
-pub fn resume(row: &SessionRow, copy: bool) -> Result<(), ResumeError> {
+pub fn resume(row: &SessionRow) -> Result<(), ResumeError> {
     let cwd = guard(row)?;
     let cmd = command_string(row, &cwd);
 
-    if copy {
-        if copy_to_clipboard(&cmd) {
-            eprintln!("csess: 클립보드에 복사됨: {cmd}");
-        } else {
-            eprintln!("csess: pbcopy 없음. 명령:\n{cmd}");
-        }
-        return Ok(());
-    }
     if std::env::var("CSESS_DRY_RUN").is_ok() {
         println!("{cmd}");
         return Ok(());

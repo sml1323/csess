@@ -125,8 +125,7 @@ fn cmd_tui() {
     let home = std::env::var("HOME").unwrap_or_default();
     match tui::run(rows, now_epoch(), home) {
         tui::Outcome::Quit => {}
-        tui::Outcome::Resume(row) => report_resume(resume::resume(&row, false)),
-        tui::Outcome::Copy(row) => report_resume(resume::resume(&row, true)),
+        tui::Outcome::Resume(row) => report_resume(resume::resume(&row)),
     }
 }
 
@@ -216,7 +215,7 @@ fn print_help() {
          csess --index-file F   파일 F 의 8필드 TSV 한 줄 (Phase A 파리티 시임)\n  \
          csess --index          Claude depth-2 세션 전체를 mtime 역순 TSV 로 (fresh)\n  \
          csess --refresh        SQLite 캐시 증분 갱신 (Claude+Codex, parsed/cached/deleted)\n\n\
-         TUI 키: 타이핑=검색 · ↑↓/ctrl-p,n=이동 · enter=resume · ctrl-y=복사 · ctrl-d,u=프리뷰 스크롤 · esc=종료\n\n\
+         TUI 키: 타이핑=검색 · ↑↓/PgUp,PgDn=이동 · enter=resume · ctrl-y=복사 · ctrl-d,u=스크롤 · alt-n,p=매치 · F1=키맵 · esc=종료\n\n\
          env:\n  \
          CSESS_CLAUDE_ROOT   Claude projects 루트 (기본 ~/.claude/projects)\n  \
          CSESS_CODEX_ROOT    Codex sessions 루트 (기본 ~/.codex/sessions)\n  \
