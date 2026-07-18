@@ -21,7 +21,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Clear, List, ListItem as UiListItem, ListState, Padding, Paragraph, Scrollbar,
+    Block, BorderType, Clear, List, ListItem as UiListItem, ListState, Padding, Paragraph, Scrollbar,
     ScrollbarOrientation, ScrollbarState,
 };
 use ratatui::Frame;
@@ -645,19 +645,9 @@ impl App {
         h.join(" · ")
     }
 
-    /// 헤더 우측: 활성 필터 필(pill) + 카운트.
+    /// 헤더 우측: 활성 스코프 필(pill) + 카운트. (소스 필터는 리스트 보더의 탭이 담당.)
     fn header_right(&self) -> Line<'static> {
         let mut spans: Vec<Span<'static>> = Vec::new();
-        if let Some(sf) = self.source_filter.as_str() {
-            spans.push(Span::styled(
-                format!(" {sf} "),
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(theme::source_color(sf))
-                    .add_modifier(Modifier::BOLD),
-            ));
-            spans.push(Span::raw(" "));
-        }
         if let Some(sc) = &self.scope {
             spans.push(Span::styled(
                 format!(" {} ", model::proj_label(sc)),
@@ -669,6 +659,37 @@ impl App {
             format!("{} ", self.header_count()),
             Style::default().fg(theme::NEUTRAL),
         ));
+        Line::from(spans)
+    }
+
+    /// 리스트 보더 타이틀 — lazygit 식 소스 필터 탭. 활성 탭=소스색(전체=NEUTRAL) bold+밑줄,
+    /// 비활성=dim. ctrl-s 순환과 1:1.
+    fn source_tabs(&self) -> Line<'static> {
+        let tabs = [
+            ("all", SourceFilter::All, theme::NEUTRAL),
+            ("claude", SourceFilter::Claude, theme::CLAUDE),
+            ("codex", SourceFilter::Codex, theme::CODEX),
+        ];
+        // 보더 위에 얹히는 타이틀은 border_style(fg)을 상속하므로 fg 를 항상 명시 —
+        // 안 그러면 비활성 탭이 보더색(호버 소스색)으로 물들어 활성처럼 보인다.
+        let inactive = Style::default().fg(theme::NEUTRAL).add_modifier(Modifier::DIM);
+        let mut spans: Vec<Span<'static>> = vec![Span::raw(" ")];
+        for (i, (label, sf, color)) in tabs.into_iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(" · ", inactive));
+            }
+            if sf == self.source_filter {
+                spans.push(Span::styled(
+                    label.to_string(),
+                    Style::default()
+                        .fg(color)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                ));
+            } else {
+                spans.push(Span::styled(label.to_string(), inactive));
+            }
+        }
+        spans.push(Span::raw(" "));
         Line::from(spans)
     }
 
@@ -729,15 +750,29 @@ impl App {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Min(40), Constraint::Percentage(55)])
             .split(chunks[1]);
-        self.page = body[0].height;
+        self.page = body[0].height.saturating_sub(2); // 상하 보더
 
-        // ── 리스트 (UP/Dir/Session 3종) — 표시폭 예산 기반 행 조립, 빈 결과는 안내 placeholder.
+        // ── 리스트 (UP/Dir/Session 3종) — lazygit 식 보더 패널: 보더색=호버 소스(듀얼톤 크롬),
+        // 타이틀=소스 필터 탭, 하단 우측=커서 위치 "k of N". 빈 결과는 안내 placeholder.
+        let mut list_block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(accent))
+            .title(self.source_tabs());
+        if !self.items.is_empty() {
+            list_block = list_block.title_bottom(
+                Line::from(Span::styled(
+                    format!(" {} of {} ", self.sel + 1, self.items.len()),
+                    // 보더 타이틀은 border_style(accent)을 상속 — fg 명시로 차단(다른 타이틀과 동일 규칙).
+                    Style::default().fg(theme::NEUTRAL).add_modifier(Modifier::DIM),
+                ))
+                .right_aligned(),
+            );
+        }
         if self.items.is_empty() {
-            let ph = Paragraph::new(self.empty_state_lines())
-                .block(list_block());
+            let ph = Paragraph::new(self.empty_state_lines()).block(list_block);
             f.render_widget(ph, body[0]);
         } else {
-            let lw = body[0].width.saturating_sub(1) as usize; // 우측 border 1
+            let lw = body[0].width.saturating_sub(2) as usize; // 좌우 보더
             let terms = search::terms(&self.query);
             let items: Vec<UiListItem> = self
                 .items
@@ -758,13 +793,13 @@ impl App {
                 .collect();
             let mut state = ListState::default();
             state.select(Some(self.sel));
-            let list = List::new(items).block(list_block());
+            let list = List::new(items).block(list_block);
             f.render_stateful_widget(list, body[0], &mut state);
         }
 
         // ── 프리뷰: 폭 변경 감지 → 랩 파생 캐시 무효화 + 재앵커.
         let pv_area = body[1];
-        let inner_w = pv_area.width.saturating_sub(3); // 패딩 2 + 스크롤바 1
+        let inner_w = pv_area.width.saturating_sub(4); // 좌우 보더 2 + 패딩 2 (스크롤바는 보더 위)
         if inner_w != self.pv_width {
             self.pv_width = inner_w;
             self.wrap_cache.clear();
@@ -773,41 +808,46 @@ impl App {
             self.preview_scroll = self.anchor_for_selection();
         }
         let lines = self.preview_content();
-        let vh = pv_area.height.saturating_sub(1); // 타이틀 행
+        let n_lines = lines.len();
+        let vh = pv_area.height.saturating_sub(2); // 상하 보더
         self.pv_height = vh;
         // 표시 전용 클램프 — self.preview_scroll(논리 앵커, 매치 순회/카운터 기준)에 되쓰지 않는다.
         // 되쓰면 콘텐츠 끝 뷰포트 안 매치에서 alt-n 순환이 고착된다(리뷰 확정 결함).
-        let max_scroll = lines.len().saturating_sub(vh as usize).min(u16::MAX as usize) as u16;
+        let max_scroll = n_lines.saturating_sub(vh as usize).min(u16::MAX as usize) as u16;
         let display_scroll = self.preview_scroll.min(max_scroll);
 
-        // 타이틀: 소스색 + proj + reltime, 우측에 매치 k/N.
+        // 보더 타이틀: 소스색 + proj + reltime, 우측 상단=매치 k/N, 우측 하단=스크롤 %.
         let counter = self.preview_match_counter();
-        let mut block = Block::default()
+        let mut block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(theme::SEPARATOR))
             .padding(Padding::horizontal(1))
             .title(self.preview_title());
+        // 보더 타이틀 스팬은 border_style(SEPARATOR)을 상속하므로 fg 명시(매몰 방지).
+        let meta = Style::default().fg(theme::NEUTRAL).add_modifier(Modifier::DIM);
         if let Some((k, n)) = counter {
             let txt = if n == 0 {
                 " 본문 매치 없음 ".to_string()
             } else {
                 format!(" 매치 {k}/{n} · M-n/p ")
             };
-            block = block.title_top(Line::from(Span::styled(txt, theme::dim())).right_aligned());
+            block = block.title_top(Line::from(Span::styled(txt, meta)).right_aligned());
         }
-        let text_area = Rect {
-            width: pv_area.width.saturating_sub(1), // 우측 1열은 스크롤바
-            ..pv_area
-        };
-        let para = Paragraph::new(lines.clone())
-            .block(block)
-            .scroll((display_scroll, 0));
-        f.render_widget(para, text_area);
-        if lines.len() > vh as usize {
-            let mut sb = ScrollbarState::new(lines.len().saturating_sub(vh as usize))
+        if n_lines > vh as usize {
+            let pct = display_scroll as usize * 100 / n_lines.saturating_sub(vh as usize).max(1);
+            block = block.title_bottom(
+                Line::from(Span::styled(format!(" {pct}% "), meta)).right_aligned(),
+            );
+        }
+        let para = Paragraph::new(lines).block(block).scroll((display_scroll, 0));
+        f.render_widget(para, pv_area);
+        if n_lines > vh as usize {
+            let mut sb = ScrollbarState::new(n_lines.saturating_sub(vh as usize))
                 .position(display_scroll as usize);
-            // 타이틀 행(첫 줄)은 제외 — 트랙이 텍스트 뷰포트와 같은 높이에서 시작.
+            // 스크롤바는 우측 보더 위에 오버레이(lazygit 식) — 상하 모서리는 제외.
             let sb_area = Rect {
                 y: pv_area.y + 1,
-                height: pv_area.height.saturating_sub(1),
+                height: pv_area.height.saturating_sub(2),
                 ..pv_area
             };
             f.render_stateful_widget(
@@ -843,15 +883,14 @@ impl App {
             Some(ListItem::Session { row_idx }) => {
                 let r = &self.rows[*row_idx];
                 let sc = theme::source_color(&r.source);
+                // 보더 타이틀은 border_style(SEPARATOR)을 상속 — dim 스팬도 fg 명시(안 하면 매몰).
+                let meta = Style::default().fg(theme::NEUTRAL).add_modifier(Modifier::DIM);
                 Line::from(vec![
                     Span::styled(" ▍".to_string(), Style::default().fg(sc)),
                     Span::styled(r.source.clone(), Style::default().fg(sc).add_modifier(Modifier::BOLD)),
-                    Span::styled(" · ".to_string(), theme::dim()),
+                    Span::styled(" · ".to_string(), meta),
                     Span::styled(r.proj.clone(), Style::default().fg(theme::TEXT_BRIGHT)),
-                    Span::styled(
-                        format!(" · {} ", model::reltime(r.mtime, self.now)),
-                        theme::dim(),
-                    ),
+                    Span::styled(format!(" · {} ", model::reltime(r.mtime, self.now)), meta),
                 ])
             }
             Some(ListItem::Dir { .. }) => Line::from(Span::styled(
@@ -938,13 +977,6 @@ impl App {
     }
 }
 
-/// 리스트 패널 공용 블록 — 구분선은 크롬 톤으로 후퇴(기본 흰색이 화면 최고 밝기였던 문제).
-fn list_block() -> Block<'static> {
-    Block::default()
-        .borders(Borders::RIGHT)
-        .border_style(Style::default().fg(theme::SEPARATOR))
-}
-
 /// 제목 문자열을 검색어 매치 강조 스팬으로 분할 — 매치는 WARN 노랑 fg + BOLD(배경 없는 가벼운 변형,
 /// 프리뷰 하이라이트와 같은 색조). terms 비면 통짜 스팬.
 fn match_spans(text: &str, terms: &[String], base: Style) -> Vec<Span<'static>> {
@@ -1006,6 +1038,7 @@ fn render_help(f: &mut Frame, within: Rect) {
     lines.push(Line::from(Span::styled("  아무 키나 눌러 닫기", theme::dim())));
     let help = Paragraph::new(lines).block(
         Block::bordered()
+            .border_type(BorderType::Rounded)
             .title(Line::from(Span::styled(
                 " 키맵 ",
                 Style::default().fg(theme::NEUTRAL).add_modifier(Modifier::BOLD),
@@ -1440,6 +1473,7 @@ mod tests {
         assert!(flat.contains("search>"));
         assert!(flat.contains("alpha"));
         assert!(flat.contains("3/3")); // 헤더 우측 카운트
+        assert!(flat.contains("1 of 3")); // 리스트 보더 하단 커서 위치
         assert!(flat.contains("enter=resume")); // 푸터 힌트
         // 트리 진입 → 프롬프트 '~>' + 📁
         app.handle_key(plain(KeyCode::Tab));
@@ -1450,20 +1484,44 @@ mod tests {
     }
 
     #[test]
-    fn renders_source_pill_and_scope_pill() {
-        let backend = TestBackend::new(100, 20);
-        let mut term = Terminal::new(backend).unwrap();
+    fn source_tabs_mark_active_and_scope_pill_renders() {
         let mut app = app();
-        app.handle_key(ctrl('s')); // claude 필
-        term.draw(|f| app.render(f)).unwrap();
-        assert!(buffer_text(&term).contains(" claude "));
+        // 탭 활성 표시: 활성 탭만 소스색 fg, 비활성은 dim(fg 없음)
+        let tab_fg = |app: &App, label: &str| {
+            app.source_tabs()
+                .spans
+                .iter()
+                .find(|s| s.content.as_ref() == label)
+                .and_then(|s| s.style.fg)
+        };
+        assert_eq!(tab_fg(&app, "all"), Some(theme::NEUTRAL));
+        assert_eq!(tab_fg(&app, "claude"), Some(theme::NEUTRAL)); // 비활성=NEUTRAL dim(보더색 상속 차단)
         app.handle_key(ctrl('s'));
-        app.handle_key(ctrl('s')); // 전체 — 필 사라짐
+        assert_eq!(tab_fg(&app, "claude"), Some(theme::CLAUDE));
+        assert_eq!(tab_fg(&app, "all"), Some(theme::NEUTRAL));
+        // 활성/비활성은 BOLD 로도 구분
+        let bold = |app: &App, label: &str| {
+            app.source_tabs()
+                .spans
+                .iter()
+                .find(|s| s.content.as_ref() == label)
+                .is_some_and(|s| s.style.add_modifier.contains(Modifier::BOLD))
+        };
+        assert!(bold(&app, "claude"));
+        assert!(!bold(&app, "all"));
+        // 스코프 필은 헤더 우측에 유지
+        app.handle_key(ctrl('s'));
+        app.handle_key(ctrl('s')); // 전체 복귀
         app.sel = 0;
         app.handle_key(ctrl('g')); // scope = /home/u/work/a
+        let backend = TestBackend::new(100, 20);
+        let mut term = Terminal::new(backend).unwrap();
         term.draw(|f| app.render(f)).unwrap();
         let s = buffer_text(&term);
         assert!(s.contains(" work/a ")); // 스코프 필
+        // 리스트 보더 탭 라벨도 렌더됨
+        assert!(s.contains("all"));
+        assert!(s.contains("codex"));
     }
 
     #[test]
